@@ -15,7 +15,7 @@
 ## 系統需求
 
 - Windows 作業系統
-- Python 3.8 或更新版本
+- Python 3.10 或更新版本
 - 至少 4GB RAM
 - 建議螢幕解析度 1920x1080 或更高
 
@@ -113,5 +113,5 @@ L 函數的解釋：
 ## 聯絡資訊
 
 如有任何問題或建議，請透過以下方式聯絡：
-- 電子郵件：[您的電子郵件]
-- GitHub Issues：[專案 Issues 頁面] 
+- 電子郵件：liaobk@email.ntou.edu.tw
+- Lab Web page： http://lbk.tw/
