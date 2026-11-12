@@ -1,914 +1,629 @@
-"""
-Spatial Pattern Analysis GUI Application -- v0.9b 2025-06-09
-=======================================
+"""Tk desktop application for two-dimensional point-pattern analysis."""
+from __future__ import annotations
 
-A GUI application for spatial point pattern analysis using Ripley's K and L functions.
-Supports CSV and Excel files with flexible column mapping.
-
-Requirements:
-- tkinter (usually comes with Python)
-- pandas
-- numpy
-- matplotlib
-- scipy
-- openpyxl (for Excel support)
-- tqdm
-
-Author: GUI Application
-
-To-do: 95% CI analysis
-"""
-
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, scrolledtext
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
-from matplotlib.backends.backend_agg import FigureCanvasAgg
-import os
-import sys
+from dataclasses import replace
+import locale
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
-import threading
-import queue
-from PIL import Image, ImageTk
+from queue import Empty, Queue
+import sys
+from threading import Event, Thread
+import tkinter as tk
+from tkinter import filedialog, ttk
 
-VERSION_INFO="v0.9b 2025-06-09"
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 
-# Import the spatial analyzer (assuming it's in the same directory)
-try:
-    from ripley_analysis import SpatialPatternAnalyzer, CellData, PatternType, RipleyResult
-except ImportError:
-    # If the spatial analyzer is not available, create a mock version
-    print("Warning: spatial_analyzer module not found. Using mock version.")
-    
-    class MockSpatialPatternAnalyzer:
-        def __init__(self):
-            pass
-        
-        def preprocess_data(self, x, y, cell_types=None):
-            return type('CellData', (), {'x': x, 'y': y, 'cell_types': cell_types})()
-        
-        def analyze_cell_types(self, data, pattern_types=None):
-            return {"original": {"Type_1": {"cell_count": len(data.x)}}}
-        
-        def plot_results(self, results, title=""):
-            fig, ax = plt.subplots(figsize=(8, 6))
-            ax.text(0.5, 0.5, "Mock Analysis Results", ha='center', va='center', fontsize=16)
-            ax.set_title(title)
-            return fig
-    
-    SpatialPatternAnalyzer = MockSpatialPatternAnalyzer
-    
-    class PatternType:
-        ORIGINAL = "original"
-        RANDOM = "random"
-        CLUSTER = "cluster"
-        REGULAR = "regular"
+from i18n import Translator
+from ripley_analysis import Cancelled, make_window
+from spatial_data import (RECT_COLUMNS, Calibration, ReadOptions, column_labels, infer_mapping,
+                          load_custom_roi, load_dataset, read_table)
+from spatial_dialogs import (ImportDialog, advanced_dialog, buttons, entry, frame, geometry_dialog,
+                             help_button, modal, number, show_error)
+from spatial_plots import contrast_figure, group_figure, roi_figure, save_pdf, select_indices
+from spatial_workflow import Settings, VERSION, export_data, interval_strings, run_analysis
 
-class DataPreviewDialog:
-    """Dialog for previewing and configuring data columns"""
-    
-    def __init__(self, parent, df: pd.DataFrame):
-        self.parent = parent
-        self.df = df
-        self.result = None
-        
-        # Create dialog window
-        self.dialog = tk.Toplevel(parent)
-        self.dialog.title("Data Preview and Column Configuration")
-        self.dialog.geometry("800x600")
-        self.dialog.grab_set()  # Make dialog modal
-        
-        self.setup_ui()
-        
-    def setup_ui(self):
-        """Setup the dialog UI"""
-        main_frame = ttk.Frame(self.dialog)
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-        
-        # Data preview section
-        preview_frame = ttk.LabelFrame(main_frame, text="Data Preview")
-        preview_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
-        
-        # Create treeview for data preview
-        self.tree = ttk.Treeview(preview_frame)
-        self.tree.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        
-        # Add scrollbars
-        tree_scroll_y = ttk.Scrollbar(preview_frame, orient=tk.VERTICAL, command=self.tree.yview)
-        tree_scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
-        self.tree.configure(yscrollcommand=tree_scroll_y.set)
-        
-        tree_scroll_x = ttk.Scrollbar(preview_frame, orient=tk.HORIZONTAL, command=self.tree.xview)
-        tree_scroll_x.pack(side=tk.BOTTOM, fill=tk.X)
-        self.tree.configure(xscrollcommand=tree_scroll_x.set)
-        
-        # Populate treeview with data
-        self.populate_preview()
-        
-        # Configuration section
-        config_frame = ttk.LabelFrame(main_frame, text="Column Configuration")
-        config_frame.pack(fill=tk.X, pady=(0, 10))
-        
-        # Header detection
-        header_frame = ttk.Frame(config_frame)
-        header_frame.pack(fill=tk.X, padx=5, pady=5)
-        
-        ttk.Label(header_frame, text="Has Header Row:").pack(side=tk.LEFT)
-        self.has_header_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(header_frame, variable=self.has_header_var, 
-                       command=self.on_header_change).pack(side=tk.LEFT, padx=(5, 0))
-        
-        # Column selection
-        columns = list(self.df.columns)
-        
-        # X coordinate column
-        x_frame = ttk.Frame(config_frame)
-        x_frame.pack(fill=tk.X, padx=5, pady=2)
-        ttk.Label(x_frame, text="X Coordinate Column:", width=20).pack(side=tk.LEFT)
-        self.x_column_var = tk.StringVar()
-        x_combo = ttk.Combobox(x_frame, textvariable=self.x_column_var, values=columns)
-        x_combo.pack(side=tk.LEFT, padx=(5, 0), fill=tk.X, expand=True)
-        
-        # Y coordinate column
-        y_frame = ttk.Frame(config_frame)
-        y_frame.pack(fill=tk.X, padx=5, pady=2)
-        ttk.Label(y_frame, text="Y Coordinate Column:", width=20).pack(side=tk.LEFT)
-        self.y_column_var = tk.StringVar()
-        y_combo = ttk.Combobox(y_frame, textvariable=self.y_column_var, values=columns)
-        y_combo.pack(side=tk.LEFT, padx=(5, 0), fill=tk.X, expand=True)
-        
-        # Cell type column (optional)
-        type_frame = ttk.Frame(config_frame)
-        type_frame.pack(fill=tk.X, padx=5, pady=2)
-        ttk.Label(type_frame, text="Cell Type Column:", width=20).pack(side=tk.LEFT)
-        self.type_column_var = tk.StringVar()
-        type_values = ["(None)"] + columns
-        type_combo = ttk.Combobox(type_frame, textvariable=self.type_column_var, values=type_values)
-        type_combo.pack(side=tk.LEFT, padx=(5, 0), fill=tk.X, expand=True)
-        
-        # Auto-detect likely columns
-        self.auto_detect_columns()
-        
-        # Button frame
-        button_frame = ttk.Frame(main_frame)
-        button_frame.pack(fill=tk.X)
-        
-        ttk.Button(button_frame, text="Cancel", command=self.cancel).pack(side=tk.RIGHT, padx=(5, 0))
-        ttk.Button(button_frame, text="OK", command=self.ok).pack(side=tk.RIGHT)
-        
-    def populate_preview(self):
-        """Populate the treeview with data preview"""
-        # Clear existing data
-        for item in self.tree.get_children():
-            self.tree.delete(item)
-        
-        # Setup columns
-        columns = list(self.df.columns)
-        self.tree["columns"] = columns
-        self.tree["show"] = "headings"
-        
-        # Configure column headings and widths
-        for col in columns:
-            self.tree.heading(col, text=str(col))
-            self.tree.column(col, width=100, minwidth=50)
-        
-        # Add data rows (limit to first 100 rows for performance)
-        for idx, row in self.df.head(100).iterrows():
-            values = [str(val) for val in row.values]
-            self.tree.insert("", tk.END, values=values)
-        
-        # Add info about total rows
-        if len(self.df) > 100:
-            info_values = [f"... ({len(self.df)} total rows)"] + [""] * (len(columns) - 1)
-            self.tree.insert("", tk.END, values=info_values)
-    
-    def auto_detect_columns(self):
-        """Automatically detect likely X, Y, and type columns"""
-        columns = list(self.df.columns)
-        
-        # Try to detect X column
-        x_candidates = [col for col in columns if 'x' in str(col).lower()]
-        if x_candidates:
-            self.x_column_var.set(x_candidates[0])
-        elif len(columns) >= 2:
-            # Look for numeric columns
-            numeric_cols = self.df.select_dtypes(include=[np.number]).columns
-            if len(numeric_cols) >= 2:
-                self.x_column_var.set(numeric_cols[0])
-        
-        # Try to detect Y column
-        y_candidates = [col for col in columns if 'y' in str(col).lower()]
-        if y_candidates:
-            self.y_column_var.set(y_candidates[0])
-        elif len(columns) >= 2:
-            numeric_cols = self.df.select_dtypes(include=[np.number]).columns
-            if len(numeric_cols) >= 2:
-                self.y_column_var.set(numeric_cols[1])
-        
-        # Try to detect type column
-        type_candidates = [col for col in columns if any(keyword in str(col).lower() 
-                          for keyword in ['type', 'class', 'category', 'label'])]
-        if type_candidates:
-            self.type_column_var.set(type_candidates[0])
-        else:
-            self.type_column_var.set("(None)")
-    
-    def on_header_change(self):
-        """Handle header checkbox change"""
-        # This could be extended to reprocess the data if needed
-        pass
-    
-    def ok(self):
-        """Handle OK button click"""
-        x_col = self.x_column_var.get()
-        y_col = self.y_column_var.get()
-        type_col = self.type_column_var.get()
-        
-        if not x_col or not y_col:
-            messagebox.showerror("Error", "Please select both X and Y coordinate columns.")
-            return
-        
-        if x_col == y_col:
-            messagebox.showerror("Error", "X and Y columns must be different.")
-            return
-        
-        # Prepare result
-        self.result = {
-            'has_header': self.has_header_var.get(),
-            'x_column': x_col,
-            'y_column': y_col,
-            'type_column': type_col if type_col != "(None)" else None
-        }
-        
-        self.dialog.destroy()
-    
-    def cancel(self):
-        """Handle Cancel button click"""
-        self.result = None
-        self.dialog.destroy()
+
+ASSETS = Path(__file__).resolve().parent
+MODES = ("infer", "locked", "rectangle", "custom")
+VIEWS = ("view_groups", "view_roi", "view_contrast", "view_qc")
+BG, WHITE, INK, MUTED, ACCENT = "#f3f6f8", "#ffffff", "#172c3c", "#526779", "#1a6fb5"
+
+
+class PlotToolbar(NavigationToolbar2Tk):
+    def __init__(self, canvas, parent, t):
+        names = {"Home": "plot_home", "Back": "plot_back", "Forward": "plot_forward",
+                 "Pan": "plot_pan", "Zoom": "plot_zoom"}
+        self.toolitems = [(name, t(names[name]), icon, method)
+                          for name, _, icon, method in self.toolitems if name in names]
+        super().__init__(canvas, parent, pack_toolbar=False)
+
+
+def demo_data():
+    path = ASSETS / "demo" / "points.csv"
+    options = ReadOptions()
+    raw = read_table(path, options, limit=4)
+    mapping = infer_mapping(column_labels(raw, options.header))
+    return load_dataset([path], options, mapping, Calibration(unit="µm"))
+
 
 class SpatialAnalysisGUI:
-    """Main GUI application for spatial pattern analysis"""
-    
-    def __init__(self, root):
-        self.root = root
-        self.root.title(f"Spatial Pattern Analysis Tool - {VERSION_INFO}")
-        self.root.geometry("1200x800")
-        
-        # Initialize variables
-        self.data = None
-        self.analyzer = SpatialPatternAnalyzer()
-        self.results = None
-        self.current_file = None
-        
-        # Create queue for thread communication
-        self.queue = queue.Queue()
-        
-        self.setup_ui()
-        self.setup_menu()
-        
-        # Start checking queue
-        self.check_queue()
-    
-    def setup_menu(self):
-        """Setup the menu bar"""
-        menubar = tk.Menu(self.root)
-        self.root.config(menu=menubar)
-        
-        # File menu
-        file_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="File", menu=file_menu)
-        file_menu.add_command(label="Open File...", command=self.open_file, accelerator="Ctrl+O")
-        file_menu.add_separator()
-        file_menu.add_command(label="Export Results...", command=self.export_results)
-        file_menu.add_separator()
-        file_menu.add_command(label="Exit", command=self.root.quit)
-        
-        # Analysis menu
-        analysis_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="Analysis", menu=analysis_menu)
-        analysis_menu.add_command(label="Run Analysis", command=self.run_analysis)
-        analysis_menu.add_command(label="Clear Results", command=self.clear_results)
-        
-        # Help menu
-        help_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="Help", menu=help_menu)
-        help_menu.add_command(label="About", command=self.show_about)
-        
-        # Bind keyboard shortcuts
-        self.root.bind('<Control-o>', lambda e: self.open_file())
-    
-    def setup_ui(self):
-        """Setup the main UI"""
-        # Create main paned window
-        main_paned = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
-        main_paned.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        
-        # Left panel for controls
-        left_frame = ttk.Frame(main_paned)
-        main_paned.add(left_frame, weight=1)
-        
-        # Right panel for results
-        right_frame = ttk.Frame(main_paned)
-        main_paned.add(right_frame, weight=2)
-        
-        self.setup_left_panel(left_frame)
-        
-        # Progress bar (放在左側，所有控制元件下方)
-        self.progress_var = tk.StringVar(value="Ready")
-        ttk.Label(left_frame, textvariable=self.progress_var).pack(fill=tk.X, padx=5, pady=(10, 0))
-        self.progress_bar = ttk.Progressbar(left_frame, mode='indeterminate')
-        self.progress_bar.pack(fill=tk.X, padx=5, pady=(0, 10))
-        
-        self.setup_right_panel(right_frame)
-    
-    def setup_left_panel(self, parent):
-        """Setup the left control panel"""
-        # File section
-        file_frame = ttk.LabelFrame(parent, text="Data File")
-        file_frame.pack(fill=tk.X, padx=5, pady=5)
-        
-        file_button_frame = ttk.Frame(file_frame)
-        file_button_frame.pack(fill=tk.X, padx=5, pady=5)
-        
-        ttk.Button(file_button_frame, text="Open File", 
-                  command=self.open_file).pack(side=tk.LEFT)
-        
-        self.file_label = ttk.Label(file_button_frame, text="No file selected")
-        self.file_label.pack(side=tk.LEFT, padx=(10, 0))
-        
-        # Data info section
-        info_frame = ttk.LabelFrame(parent, text="Data Information")
-        info_frame.pack(fill=tk.X, padx=5, pady=5)
-        
-        self.info_text = scrolledtext.ScrolledText(info_frame, height=8, wrap=tk.WORD)
-        self.info_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        
-        # Analysis options section
-        options_frame = ttk.LabelFrame(parent, text="Analysis Options")
-        options_frame.pack(fill=tk.X, padx=5, pady=5)
-        
-        # Pattern types selection
-        ttk.Label(options_frame, text="Pattern Types to Analyze:").pack(anchor=tk.W, padx=5, pady=(5, 0))
-        
-        self.pattern_vars = {}
-        pattern_types = [
-            ("Original", PatternType.ORIGINAL),
-            ("Random", PatternType.RANDOM),
-            ("Cluster", PatternType.CLUSTER),
-            ("Regular", PatternType.REGULAR)
-        ]
-        
-        for name, pattern_type in pattern_types:
-            var = tk.BooleanVar(value=(pattern_type == PatternType.ORIGINAL))
-            self.pattern_vars[pattern_type] = var
-            ttk.Checkbutton(options_frame, text=name, variable=var).pack(anchor=tk.W, padx=20)
-        
-        # Analysis parameters
-        params_frame = ttk.Frame(options_frame)
-        params_frame.pack(fill=tk.X, padx=5, pady=5)
-        
-        ttk.Label(params_frame, text="Scan Scope:").grid(row=0, column=0, sticky=tk.W)
-        self.scan_scope_var = tk.DoubleVar(value=6.0)
-        ttk.Entry(params_frame, textvariable=self.scan_scope_var, width=10).grid(row=0, column=1, padx=(5, 0))
-        
-        ttk.Label(params_frame, text="Shrink Factor:").grid(row=1, column=0, sticky=tk.W)
-        self.shrink_factor_var = tk.DoubleVar(value=0.8)
-        ttk.Entry(params_frame, textvariable=self.shrink_factor_var, width=10).grid(row=1, column=1, padx=(5, 0))
-        
-        ttk.Label(params_frame, text="Number of Radii:").grid(row=2, column=0, sticky=tk.W)
-        self.n_radii_var = tk.IntVar(value=100)
-        ttk.Entry(params_frame, textvariable=self.n_radii_var, width=10).grid(row=2, column=1, padx=(5, 0))
-        
-        # Run analysis button
-        self.run_button = ttk.Button(options_frame, text="Run Analysis", 
-                                   command=self.run_analysis, state=tk.DISABLED)
-        self.run_button.pack(pady=10)
+    def __init__(self, root, language="en"):
+        self.root, self.t = root, Translator(language)
+        self.data, self.results, self.figure = None, None, None
+        self.settings = Settings()
+        self.dataset_name = ""
+        self.roi_path, self.intensity_path = "", ""
+        self.view, self.selected = "view_groups", {}
+        self.queue, self.job, self.next_job = Queue(), None, 0
+        self.stop = None
+        self.status = ("ready", {})
+        self.draw_shell()
+        root.after(70, self.poll)
+        root.protocol("WM_DELETE_WINDOW", self.close)
 
-        # Add export buttons frame
-        export_frame = ttk.Frame(parent)
-        export_frame.pack(fill=tk.X, padx=5, pady=5)
-        
-        ttk.Button(export_frame, text="Export Figure", 
-                  command=self.export_figure).pack(side=tk.LEFT, padx=5)
-        ttk.Button(export_frame, text="Export Results", 
-                  command=self.export_data).pack(side=tk.LEFT, padx=5)
-    
-    def setup_right_panel(self, parent):
-        """Setup the right results panel"""
-        # Create notebook for tabbed results
-        self.notebook = ttk.Notebook(parent)
-        self.notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        
+    def setup_styles(self):
+        style = ttk.Style(self.root)
+        style.theme_use("clam")
+        family = "Microsoft JhengHei UI" if self.t.lang == "zh-TW" else "Segoe UI"
+        self.root.option_add("*Font", (family, 10))
+        style.configure(".", font=(family, 10), background=BG, foreground=INK)
+        style.configure("TFrame", background=BG)
+        style.configure("TButton", padding=(11, 6), background=WHITE, bordercolor="#c5d3dd", relief="flat")
+        style.map("TButton", background=[("active", "#e7f1fa"), ("disabled", "#e9eff3")])
+        style.configure("Primary.TButton", background=ACCENT, bordercolor=ACCENT, foreground=WHITE)
+        style.map("Primary.TButton", background=[("disabled", "#a1b8ca"), ("active", "#145b96")],
+                  foreground=[("disabled", WHITE), ("active", WHITE)])
+        style.configure("Help.TButton", padding=(1, 0), borderwidth=0, background=BG, foreground=ACCENT)
+        style.configure("Title.TLabel", font=(family, 20, "bold"), foreground=INK)
+        style.configure("Hero.TLabel", font=(family, 24, "bold"), background=WHITE, foreground=INK)
+        style.configure("HeroBody.TLabel", font=(family, 11), background=WHITE, foreground=MUTED)
+        style.configure("Card.TFrame", background=WHITE)
+        style.configure("Section.TLabel", font=(family, 11, "bold"))
+        style.configure("Muted.TLabel", foreground=MUTED)
+        style.configure("TNotebook", background=BG, borderwidth=0, padding=0)
+        style.configure("TNotebook.Tab", padding=(13, 8))
+        style.map("TNotebook.Tab", background=[("selected", WHITE), ("!selected", "#e5edf3")])
+        style.configure("Treeview", background=WHITE, fieldbackground=WHITE, rowheight=27)
+        style.configure("Treeview.Heading", background="#e7eef4", padding=(6, 5))
+        self.root.configure(bg=BG)
 
-        
-        # Placeholder tab
-        placeholder_frame = ttk.Frame(self.notebook)
-        self.notebook.add(placeholder_frame, text="Welcome")
-        
-        welcome_text = """
-Welcome to Spatial Pattern Analysis Tool!
+    def draw_shell(self):
+        for child in self.root.winfo_children():
+            child.destroy()
+        self.figure = None
+        self.setup_styles()
+        root, t = self.root, self.t
+        root.title(f"{t('title')}  ·  {VERSION}")
+        header = ttk.Frame(root, padding=(21, 13, 21, 12))
+        header.pack(fill="x")
+        names = ttk.Frame(header)
+        names.pack(side="left")
+        ttk.Label(names, text=t("title"), style="Title.TLabel").pack(anchor="w")
+        ttk.Label(names, text=t("subtitle"), style="Muted.TLabel").pack(anchor="w")
+        languages = ttk.Combobox(header, values=("English", "繁體中文"), width=11, state="readonly")
+        languages.current(t.lang == "zh-TW")
+        languages.pack(side="right", padx=(8, 0))
+        languages.bind("<<ComboboxSelected>>", lambda _: self.switch_language(languages.current()))
+        ttk.Button(header, text=t("methods"), command=self.methods).pack(side="right")
+        self.open_btn = ttk.Button(header, text=t("open"), command=self.open_data)
+        self.open_btn.pack(side="right", padx=8)
+        body = ttk.Frame(root, padding=(20, 0, 20, 0))
+        body.pack(fill="both", expand=True)
+        body.columnconfigure(1, weight=1)
+        body.rowconfigure(0, weight=1)
+        side = ttk.Frame(body, padding=(0, 13, 17, 0), width=275)
+        side.grid(row=0, column=0, sticky="nsw")
+        side.grid_propagate(False)
+        side.pack_propagate(False)
+        ttk.Label(side, text=t("workflow"), style="Section.TLabel").pack(anchor="w")
+        ttk.Separator(side).pack(fill="x", pady=(8, 13))
+        ttk.Label(side, text=t("data"), style="Section.TLabel").pack(anchor="w")
+        self.dataset_label = ttk.Label(side, wraplength=240, justify="left", style="Muted.TLabel")
+        self.dataset_label.pack(fill="x", pady=(4, 8))
+        self.demo_btn = ttk.Button(side, text=t("demo"), command=self.open_demo)
+        self.demo_btn.pack(anchor="w")
+        ttk.Separator(side).pack(fill="x", pady=14)
+        roi_line = ttk.Frame(side)
+        roi_line.pack(fill="x")
+        ttk.Label(roi_line, text=t("roi"), style="Section.TLabel").pack(side="left")
+        help_button(roi_line, t("roi_help")).pack(side="left", padx=4)
+        self.mode = ttk.Combobox(side, values=[t(mode) for mode in MODES], state="readonly", width=28)
+        self.mode.current(MODES.index(self.settings.roi_mode))
+        self.mode.pack(fill="x", pady=(4, 0))
+        self.mode.bind("<<ComboboxSelected>>", self.change_roi)
+        self.roi_note = ttk.Label(side, wraplength=243, justify="left", style="Muted.TLabel")
+        self.roi_note.pack(fill="x", pady=(8, 6))
+        self.roi_buttons = ttk.Frame(side)
+        self.roi_buttons.pack(fill="x")
+        self.advanced_btn = ttk.Button(side, text=t("advanced"), command=self.open_advanced)
+        self.advanced_btn.pack(fill="x", pady=(15, 5))
+        self.run_btn = ttk.Button(side, text=t("run"), style="Primary.TButton", command=self.start)
+        self.run_btn.pack(fill="x", pady=(0, 6))
+        self.cancel_btn = ttk.Button(side, text=t("cancel_job"), command=self.cancel)
+        self.cancel_btn.pack(fill="x")
+        main = ttk.Frame(body)
+        main.grid(row=0, column=1, sticky="nsew")
+        self.main = main
+        footer = ttk.Frame(root, padding=(21, 9))
+        footer.pack(fill="x")
+        self.status_label = ttk.Label(footer, text=t(self.status[0], **self.status[1]), style="Muted.TLabel")
+        self.status_label.pack(side="left")
+        self.progress = ttk.Progressbar(footer, length=185, mode="determinate")
+        self.progress.pack(side="right")
+        self.refresh_sidebar()
+        self.render_main()
+        root.bind("<Control-o>", lambda _: self.open_data())
 
-Instructions:
-1. Click 'Open File' to load your data (CSV or Excel format)
-2. Configure column mapping in the preview dialog
-3. Select analysis options
-4. Click 'Run Analysis' to start
+    def set_status(self, key, **values):
+        self.status = (key, values)
+        self.status_label.configure(text=self.t(key, **values))
 
-Supported file formats:
-- CSV files (.csv)
-- Excel files (.xlsx, .xls)
+    def switch_language(self, selected):
+        self.t = Translator("zh-TW" if selected else "en")
+        self.draw_shell()
 
-Data format should include:
-- X coordinate column
-- Y coordinate column  
-- Optional: Cell type/category column
-        """
-        
-        ttk.Label(placeholder_frame, text=welcome_text, justify=tk.LEFT).pack(padx=20, pady=20)
-    
-    def open_file(self):
-        """Open and load a data file"""
-        filetypes = [
-            ("All Supported", "*.csv;*.xlsx;*.xls"), 
-            ("CSV files", "*.csv"),
-            ("Excel files", "*.xlsx;*.xls"),
-            ("All files", "*.*")
-        ]
-        
-        filename = filedialog.askopenfilename(
-            title="Select Data File",
-            filetypes=filetypes
-        )
-        
-        if not filename:
-            return
-        
-        try:
-            # Load file based on extension
-            file_ext = Path(filename).suffix.lower()
-            
-            if file_ext == '.csv':
-                df = pd.read_csv(filename)
-            elif file_ext in ['.xlsx', '.xls']:
-                df = pd.read_excel(filename)
-            else:
-                messagebox.showerror("Error", f"Unsupported file format: {file_ext}")
-                return
-            
-            # Show preview dialog
-            preview_dialog = DataPreviewDialog(self.root, df)
-            self.root.wait_window(preview_dialog.dialog)
-            
-            if preview_dialog.result is None:
-                return  # User cancelled
-            
-            config = preview_dialog.result
-            
-            # Process the data based on configuration
-            if not config['has_header']:
-                # If no header, use numeric column names
-                df.columns = [f"Column_{i}" for i in range(len(df.columns))]
-            
-            # Extract coordinates and cell types
-            x_data = df[config['x_column']].values
-            y_data = df[config['y_column']].values
-            
-            if config['type_column']:
-                type_data = df[config['type_column']].values
-            else:
-                type_data = np.array(['All'] * len(x_data))
-            
-            # Create CellData object
-            self.data = self.analyzer.preprocess_data(x_data, y_data, type_data)
-            
-            # Update UI
-            self.current_file = filename
-            self.file_label.config(text=Path(filename).name)
-            self.run_button.config(state=tk.NORMAL)
-            
-            # Update info text
-            self.update_info_display()
-            
-            messagebox.showinfo("Success", f"Data loaded successfully!\n"
-                              f"Total points: {len(self.data.x)}\n"
-                              f"Cell types: {len(np.unique(self.data.cell_types))}")
-            
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to load file:\n{str(e)}")
-    
-    def update_info_display(self):
-        """Update the information display"""
+    def refresh_sidebar(self):
+        t = self.t
         if self.data is None:
-            self.info_text.delete(1.0, tk.END)
-            self.info_text.insert(tk.END, "No data loaded.")
+            text = t("no_data")
+        else:
+            data = self.data
+            text = self.dataset_name + "\n" + t("data_count", n=len(data.points), N=data.points.sample_id.nunique(),
+                                               fields=len({(s, r) for _, s, r in data.fields}))
+            if len(data.issues):
+                text += "\n" + t("qc_count", count=len(data.issues))
+        self.dataset_label.configure(text=text)
+        mode = self.settings.roi_mode
+        note = t(mode + "_note")
+        if mode == "rectangle" and self.settings.rectangle is not None:
+            note += "\n" + " · ".join(f"{x:g}" for x in self.settings.rectangle)
+        if mode == "custom" and self.settings.custom:
+            note += "\n" + (Path(self.roi_path).name if self.roi_path else str(len(self.settings.custom)))
+        self.roi_note.configure(text=note)
+        for child in self.roi_buttons.winfo_children():
+            child.destroy()
+        actions = {"rectangle": (("configure_roi", self.rectangle_dialog),),
+                   "custom": (("load_roi", self.import_roi), ("draw_roi", self.draw_roi))}
+        for label, command in actions.get(mode, ()):
+            ttk.Button(self.roi_buttons, text=t(label), command=command,
+                       state="normal" if self.data is not None and not self.job else "disabled").pack(anchor="w", pady=2)
+        busy = self.job is not None
+        for widget in (self.open_btn, self.demo_btn):
+            widget.configure(state="disabled" if busy else "normal")
+        state = "normal" if self.data is not None and not busy else "disabled"
+        self.mode.configure(state="readonly" if state == "normal" else "disabled")
+        self.advanced_btn.configure(state=state)
+        self.run_btn.configure(state=state)
+        self.cancel_btn.configure(state="normal" if busy and self.job[1] == "analysis" else "disabled")
+        if self.results is not None and hasattr(self, "clear_btn") and self.clear_btn.winfo_exists():
+            self.clear_btn.configure(state="disabled" if busy else "normal")
+
+    def change_roi(self, _):
+        self.settings = replace(self.settings, roi_mode=MODES[self.mode.current()])
+        self.refresh_sidebar()
+
+    def open_data(self):
+        if self.job is not None:
             return
-        
-        info_text = f"File: {Path(self.current_file).name}\n"
-        info_text += f"Total points: {len(self.data.x)}\n"
-        info_text += f"X range: {np.min(self.data.x):.2f} - {np.max(self.data.x):.2f}\n"
-        info_text += f"Y range: {np.min(self.data.y):.2f} - {np.max(self.data.y):.2f}\n"
-        
-        if self.data.cell_types is not None:
-            unique_types, counts = np.unique(self.data.cell_types, return_counts=True)
-            info_text += f"\nCell types ({len(unique_types)}):\n"
-            for cell_type, count in zip(unique_types, counts):
-                info_text += f"  {cell_type}: {count}\n"
-        
-        self.info_text.delete(1.0, tk.END)
-        self.info_text.insert(tk.END, info_text)
-    
-    def run_analysis(self):
-        """Run the spatial analysis in a separate thread"""
-        if self.data is None:
-            messagebox.showerror("Error", "Please load data first.")
+        files = filedialog.askopenfilenames(parent=self.root, title=self.t("open"), filetypes=[
+            ("CSV / TSV / Excel", ("*.csv", "*.tsv", "*.txt", "*.xlsx", "*.xls")), ("*", "*")])
+        if files:
+            ImportDialog(self.root, self.t, files, self.import_points)
+
+    def import_points(self, paths, options, mapping, calibration, duplicates):
+        name = Path(paths[0]).name if len(paths) == 1 else f"{Path(paths[0]).name} +{len(paths) - 1}"
+        self.launch("import", lambda _job, _stop: (load_dataset(paths, options, mapping, calibration, duplicates), name))
+
+    def open_demo(self):
+        if self.job is None:
+            self.launch("import", lambda _job, _stop: (demo_data(), "Demo · points.csv"))
+
+    def rectangle_dialog(self):
+        dialog = modal(self.root, self.t("configure_roi"))
+        base = frame(dialog)
+        factors = self.data.calibration.factors
+        old = self.settings.rectangle
+        values = old if old is not None else ("", "", "", "")
+        if old is not None:
+            values = [v / factors[i % 2] for i, v in enumerate(old)]
+        controls = [entry(base, self.t, label, value, "bounds_help") for label, value in zip(RECT_COLUMNS, values)]
+
+        def accept():
+            try:
+                bounds = tuple(number(control, float, self.t, key) * factors[i % 2]
+                               for i, (key, control) in enumerate(zip(RECT_COLUMNS, controls)))
+                make_window("rectangle", [], bounds)
+                self.settings = replace(self.settings, rectangle=bounds)
+                self.refresh_sidebar()
+                dialog.destroy()
+            except ValueError as error:
+                show_error(dialog, self.t, error)
+
+        buttons(base, self.t, accept)
+
+    def import_roi(self):
+        t = self.t
+        path = filedialog.askopenfilename(parent=self.root, title=t("load_roi"), filetypes=[
+            ("ROI · GeoJSON / WKT / PNG / TIFF", ("*.geojson", "*.json", "*.wkt", "*.png", "*.tif", "*.tiff"))])
+        if not path:
             return
-        
-        # Get selected pattern types
-        selected_patterns = [pattern_type for pattern_type, var in self.pattern_vars.items() 
-                           if var.get()]
-        
-        if not selected_patterns:
-            messagebox.showerror("Error", "Please select at least one pattern type.")
+
+        def load(origin, parent):
+            try:
+                geometry = load_custom_roi(path, self.data.calibration, origin)
+                for window in geometry.values():
+                    make_window("custom", [], geometry=window)
+                self.settings = replace(self.settings, custom=geometry)
+                self.roi_path = path
+                self.refresh_sidebar()
+                return True
+            except Exception as error:
+                show_error(parent, t, error)
+                return False
+
+        if Path(path).suffix.lower() not in (".png", ".tif", ".tiff"):
+            load((0, 0), self.root)
             return
-        
-        # Update analyzer parameters
-        self.analyzer.scan_scope = self.scan_scope_var.get()
-        self.analyzer.shrink_factor = self.shrink_factor_var.get()
-        self.analyzer.n_radii = self.n_radii_var.get()
-        
-        # Start analysis in separate thread
-        self.progress_var.set("Running analysis...")
-        self.progress_bar.start()
-        self.run_button.config(state=tk.DISABLED)
-        
-        thread = threading.Thread(target=self._run_analysis_thread, args=(selected_patterns,))
-        thread.daemon = True
-        thread.start()
-    
-    def _run_analysis_thread(self, selected_patterns):
-        """Run analysis in background thread"""
-        try:
-            self.queue.put(('progress', f"Calculating Ripley Function..."))
-            results = self.analyzer.analyze_cell_types(self.data, pattern_types=selected_patterns)
-            self.queue.put(('success', results))
-        except Exception as e:
-            self.queue.put(('error', str(e)))
-    
-    def check_queue(self):
-        """Check for messages from background thread"""
+        dialog = modal(self.root, t("mask_origin"))
+        base = frame(dialog)
+        x = entry(base, t, "x", "0", "origin_help")
+        y = entry(base, t, "y", "0", "origin_help")
+
+        def accept():
+            try:
+                if load((number(x, float, t, "x"), number(y, float, t, "y")), dialog):
+                    dialog.destroy()
+            except ValueError as error:
+                show_error(dialog, t, error)
+
+        buttons(base, t, accept)
+
+    def draw_roi(self):
+        def save(key, geometry):
+            self.settings = replace(self.settings, custom={**self.settings.custom, key: geometry})
+            self.refresh_sidebar()
+        geometry_dialog(self.root, self.t, self.data, save)
+
+    def open_advanced(self):
+        def save(settings, path):
+            self.settings, self.intensity_path = settings, path
+        advanced_dialog(self.root, self.t, self.data, self.settings, self.intensity_path, save)
+
+    def launch(self, kind, work):
+        if self.job is not None:
+            return
+        self.next_job += 1
+        job = self.next_job
+        self.job = (job, kind)
+        self.stop = Event()
+        stop = self.stop
+        self.set_status("loading" if kind == "import" else "preparing")
+        self.progress.configure(value=0, maximum=100)
+        self.refresh_sidebar()
+
+        def worker():
+            try:
+                result = work(job, stop)
+                self.queue.put((job, "success", result))
+            except Cancelled:
+                self.queue.put((job, "canceled", None))
+            except Exception as error:
+                self.queue.put((job, "error", error))
+
+        Thread(target=worker, daemon=True).start()
+
+    def start(self):
+        if self.data is None or self.job is not None:
+            return
+        data, settings = self.data, self.settings
+        roi_path, intensity_path = self.roi_path, self.intensity_path
+
+        def analyze(job, stop):
+            results = run_analysis(data, settings, lambda done, total: self.queue.put((job, "progress", (done, total))), stop)
+            results.source_roi, results.source_intensity = roi_path, intensity_path
+            return results
+
+        self.launch("analysis", analyze)
+
+    def poll(self):
         try:
             while True:
-                msg_type, data = self.queue.get_nowait()
-                
-                if msg_type == 'success':
-                    self.results = data
-                    self.display_results()
-                    self.progress_var.set("Analysis completed")
-                    self.progress_bar.stop()
-                    self.run_button.config(state=tk.NORMAL)
-                    
-                elif msg_type == 'error':
-                    messagebox.showerror("Analysis Error", f"Analysis failed:\n{data}")
-                    self.progress_var.set("Analysis failed")
-                    self.progress_bar.stop()
-                    self.run_button.config(state=tk.NORMAL)
-                    
-                elif msg_type == 'progress':
-                    self.progress_var.set(data)
-                    
-        except queue.Empty:
+                job, message, payload = self.queue.get_nowait()
+                if self.job is None or self.job[0] != job:
+                    continue
+                kind = self.job[1]
+                if message == "progress":
+                    done, total = payload
+                    if not self.stop.is_set():
+                        self.set_status("progress", done=done, total=total) if done < total else self.set_status("finalizing")
+                    self.progress.configure(value=done, maximum=max(1, total))
+                    continue
+                canceled = self.stop.is_set() or message == "canceled"
+                self.job, self.stop = None, None
+                try:
+                    if canceled:
+                        self.set_status("canceled")
+                    elif message == "error":
+                        self.set_status("failed")
+                        show_error(self.root, self.t, payload)
+                    elif kind == "import":
+                        self.data, self.dataset_name = payload
+                        self.results = None
+                        self.settings = Settings(roi_mode="rectangle" if self.data.bounds else "infer")
+                        self.mode.current(MODES.index(self.settings.roi_mode))
+                        self.roi_path, self.intensity_path = "", ""
+                        self.selected.clear()
+                        self.set_status("ready")
+                        self.render_main()
+                    else:
+                        self.results = payload
+                        self.view = "view_groups"
+                        self.selected.clear()
+                        self.set_status("done")
+                        self.render_main()
+                except Exception as error:
+                    self.set_status("failed")
+                    show_error(self.root, self.t, error)
+                finally:
+                    self.refresh_sidebar()
+        except Empty:
             pass
-        
-        # Schedule next check
-        self.root.after(100, self.check_queue)
-    
-    def display_results(self):
-        """Display analysis results in the notebook"""
+        finally:
+            self.root.after(70, self.poll)
+
+    def cancel(self):
+        if self.stop is not None:
+            self.stop.set()
+            self.set_status("canceled")
+
+    def close(self):
+        if self.stop is not None:
+            self.stop.set()
+        self.root.destroy()
+
+    def render_main(self):
+        t = self.t
+        self.figure = None
+        for child in self.main.winfo_children():
+            child.destroy()
         if self.results is None:
+            self.welcome()
             return
-        
-        # Clear existing result tabs
-        for tab_id in self.notebook.tabs()[1:]:  # Keep welcome tab
-            self.notebook.forget(tab_id)
-        
-        # Create a single figure for all patterns
-        tab_frame = None
-        try:
-            # 創建高解析度圖形
-            fig = self.analyzer.plot_results(self.results, "Analysis Results")
-            
-            # 將圖形渲染成高解析度圖片
-            #fig.set_dpi(300)
-            #fig.set_size_inches(18, 12)
-            
-            # 將 matplotlib 圖形轉換為 PIL Image
-            canvas = FigureCanvasAgg(fig)
-            canvas.draw()
-            buf = canvas.buffer_rgba()
-            pil_image = Image.frombytes('RGBA', canvas.get_width_height(), buf)
-            
-            # Create a single tab for all results
-            tab_frame = ttk.Frame(self.notebook)
-            self.notebook.add(tab_frame, text="Analysis Results")
-            
-            # 創建一個框架來容納畫布和工具欄
-            canvas_frame = ttk.Frame(tab_frame)
-            canvas_frame.pack(fill=tk.BOTH, expand=True)
-            
-            # 創建 tkinter Canvas 來顯示圖片
-            self.result_canvas = tk.Canvas(canvas_frame, bg='white')
-            self.result_canvas.pack(fill=tk.BOTH, expand=True)
-            
-            # 將 PIL Image 轉換為 PhotoImage
-            self.original_image = pil_image
-            self.zoom_factor = 0.15  # 初始縮放比例為15%
-            
-            # 調整圖片大小
-            new_width = int(pil_image.width * self.zoom_factor)
-            new_height = int(pil_image.height * self.zoom_factor)
-            resized_image = pil_image.resize((new_width, new_height), Image.Resampling.LANCZOS)
-            self.result_image = ImageTk.PhotoImage(resized_image)
-            
-            # 在 Canvas 上顯示圖片
-            self.result_canvas.create_image(0, 0, anchor=tk.NW, image=self.result_image)
-            
-            # 添加縮放控制
-            control_frame = ttk.Frame(tab_frame)
-            control_frame.pack(fill=tk.X, padx=5, pady=5)
-            
-            # 縮放控制
-            zoom_frame = ttk.LabelFrame(control_frame, text="Zoom Control")
-            zoom_frame.pack(side=tk.LEFT, padx=5)
-            
-            zoom_in_btn = ttk.Button(zoom_frame, text="Zoom In", width=8,
-                                   command=lambda: self._zoom_canvas(1.2))
-            zoom_in_btn.pack(side=tk.LEFT, padx=2, pady=2)
-            
-            zoom_out_btn = ttk.Button(zoom_frame, text="Zoom Out", width=8,
-                                    command=lambda: self._zoom_canvas(0.8))
-            zoom_out_btn.pack(side=tk.LEFT, padx=2, pady=2)
-            
-            reset_btn = ttk.Button(zoom_frame, text="Reset View", width=8,
-                                 command=self._reset_canvas)
-            reset_btn.pack(side=tk.LEFT, padx=2, pady=2)
-            
-            # 添加滾動條
-            h_scroll = ttk.Scrollbar(canvas_frame, orient=tk.HORIZONTAL, 
-                                   command=self.result_canvas.xview)
-            h_scroll.pack(side=tk.BOTTOM, fill=tk.X)
-            
-            v_scroll = ttk.Scrollbar(canvas_frame, orient=tk.VERTICAL,
-                                   command=self.result_canvas.yview)
-            v_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-            
-            self.result_canvas.configure(xscrollcommand=h_scroll.set,
-                                      yscrollcommand=v_scroll.set)
-            
-            # 設置 Canvas 的滾動區域
-            self.result_canvas.configure(scrollregion=self.result_canvas.bbox("all"))
-            
-            # 添加滑鼠滾輪縮放
-            self.result_canvas.bind("<MouseWheel>", self._on_mousewheel)
-            
-            # 添加拖曳功能
-            self.result_canvas.bind("<ButtonPress-1>", self._start_pan)
-            self.result_canvas.bind("<B1-Motion>", self._pan)
-            
-            # 初始化拖曳變數
-            self.pan_start_x = 0
-            self.pan_start_y = 0
-            
-            # Close the figure to prevent memory leaks
-            plt.close(fig)
-            
-        except Exception as e:
-            # Fallback to text display if plotting fails
-            if tab_frame is None:
-                tab_frame = ttk.Frame(self.notebook)
-                self.notebook.add(tab_frame, text="Analysis Results")
-            error_label = ttk.Label(tab_frame, text=f"Error creating plot: {str(e)}")
-            error_label.pack(expand=True)
-        
-        # Switch to results tab
-        if len(self.notebook.tabs()) > 1:
-            self.notebook.select(1)
-    
-    def _zoom_canvas(self, factor):
-        """縮放畫布內容"""
-        self.zoom_factor *= factor
-        
-        # 獲取當前可見區域的中心點
-        bbox = self.result_canvas.bbox("all")
-        center_x = (bbox[0] + bbox[2]) / 2
-        center_y = (bbox[1] + bbox[3]) / 2
-        
-        # 重新調整圖片大小
-        new_width = int(self.original_image.width * self.zoom_factor)
-        new_height = int(self.original_image.height * self.zoom_factor)
-        
-        # 使用 PIL 的 resize 方法重新調整圖片大小
-        resized_image = self.original_image.resize((new_width, new_height), Image.Resampling.LANCZOS)
-        self.result_image = ImageTk.PhotoImage(resized_image)
-        
-        # 更新畫布
-        self.result_canvas.delete("all")
-        self.result_canvas.create_image(center_x, center_y, anchor=tk.CENTER, image=self.result_image)
-        
-        # 更新滾動區域
-        self.result_canvas.configure(scrollregion=self.result_canvas.bbox("all"))
-    
-    def _reset_canvas(self):
-        """重置畫布視圖"""
-        self.zoom_factor = 0.25  # 重置為25%
-        
-        # 重新調整圖片大小
-        new_width = int(self.original_image.width * self.zoom_factor)
-        new_height = int(self.original_image.height * self.zoom_factor)
-        resized_image = self.original_image.resize((new_width, new_height), Image.Resampling.LANCZOS)
-        self.result_image = ImageTk.PhotoImage(resized_image)
-        
-        # 更新畫布
-        self.result_canvas.delete("all")
-        self.result_canvas.create_image(0, 0, anchor=tk.NW, image=self.result_image)
-        self.result_canvas.configure(scrollregion=self.result_canvas.bbox("all"))
-    
-    def _on_mousewheel(self, event):
-        """處理滑鼠滾輪事件"""
-        if event.delta > 0:
-            self._zoom_canvas(1.1)
+        bar = ttk.Frame(self.main)
+        bar.pack(fill="x", pady=(0, 6))
+        ttk.Label(bar, text=t("results"), style="Section.TLabel").pack(side="left")
+        self.pdf_btn = ttk.Button(bar, text=t("pdf"), command=self.export_pdf)
+        self.pdf_btn.pack(side="right")
+        ttk.Button(bar, text=t("data_export"), command=self.export_tables).pack(side="right", padx=6)
+        self.clear_btn = ttk.Button(bar, text=t("clear_results"), command=self.clear_results,
+                                    state="disabled" if self.job else "normal")
+        self.clear_btn.pack(side="right")
+        tabs = ttk.Notebook(self.main)
+        tabs.pack(fill="both", expand=True)
+        self.pages = {}
+        for key in VIEWS:
+            page = ttk.Frame(tabs, padding=(9, 8))
+            self.pages[key] = page
+            tabs.add(page, text=t(key))
+        tabs.select(self.pages[self.view])
+
+        def change(_):
+            selected = tabs.select()
+            key = next((k for k, page in self.pages.items() if str(page) == selected), None)
+            if key is not None and (key != self.view or not self.pages[key].winfo_children()):
+                self.view = key
+                self.render_view()
+
+        tabs.bind("<<NotebookTabChanged>>", change)
+        self.render_view()
+
+    def welcome(self):
+        t = self.t
+        hero = ttk.Frame(self.main, style="Card.TFrame", padding=(32, 37))
+        hero.pack(fill="both", expand=True)
+        ttk.Label(hero, text=t("welcome_title"), style="Hero.TLabel", wraplength=530).pack(anchor="w")
+        ttk.Label(hero, text=t("welcome_body"), style="HeroBody.TLabel", wraplength=520, justify="left").pack(anchor="w", pady=(12, 18))
+        if self.data is not None and len(self.data.issues):
+            ttk.Label(hero, text=t("qc_before_run"), style="Hero.TLabel").pack(anchor="w", pady=(8, 3))
+            self.qc_table(hero, self.data.issues)
+
+    def selected_item(self, page, labels):
+        key = self.view
+        index = min(self.selected.get(key, 0), len(labels) - 1)
+        if len(labels) < 2:
+            return index
+        combo = ttk.Combobox(page, values=labels, state="readonly", width=45)
+        combo.current(index)
+        combo.pack(anchor="w", pady=(0, 6))
+
+        def select(_):
+            self.selected[key] = combo.current()
+            self.render_view()
+        combo.bind("<<ComboboxSelected>>", select)
+        return index
+
+    def render_view(self):
+        t = self.t
+        page = self.pages[self.view]
+        for child in page.winfo_children():
+            child.destroy()
+        self.figure = None
+        result = self.results
+        if self.view == "view_groups":
+            labels = list(dict.fromkeys(s.label for s in result.summaries))
+            if labels:
+                i = self.selected_item(page, [label or t("all") for label in labels])
+                notes = [t("group_caption"), t("group_caption_n")]
+                if result.settings.band != "off" and any(s.n.min() < (3 if result.settings.band == "ci" else 2)
+                                                         for s in result.summaries if s.label == labels[i]):
+                    notes.append(t("band_na"))
+                if result.settings.band == "ci":
+                    notes.append(t("no_band_common"))
+                self.show_figure(page, group_figure(result, labels[i], t), notes)
+            else:
+                ttk.Label(page, text=t("no_summary"), wraplength=550).pack(anchor="w")
+        elif self.view == "view_roi":
+            patterns = result.patterns
+            i = self.selected_item(page, [f"{p.sample} / {p.roi}  ·  {p.label or t('all')}" for p in patterns])
+            p = patterns[i]
+            note = t("inference", status=t(p.status), null=t(p.null), n=p.count)
+            if p.target_count is not None:
+                note += t("n_targets", n=p.target_count)
+            notes = [note + "  ·  " + t(p.window.correction)]
+            notes.extend(self.envelope_notes(p.envelope, p.p_adjusted))
+            shown = len(select_indices(len(p.xy)))
+            if shown < len(p.xy):
+                notes.append(t("point_count_drawn", n=shown, total=len(p.xy)))
+            notes.extend(t(qc) for qc in p.qc)
+            self.show_figure(page, roi_figure(result, p, t), notes)
+        elif self.view == "view_contrast":
+            contrasts = result.contrasts
+            if contrasts:
+                i = self.selected_item(page, [c.label or t("all") for c in contrasts])
+                c = contrasts[i]
+                notes = [f"{c.a} (N={c.n_a})  ·  {c.b} (N={c.n_b})"]
+                notes.extend(self.envelope_notes(c.envelope, c.p_adjusted))
+                self.show_figure(page, contrast_figure(result, c, t), notes)
+            else:
+                ttk.Label(page, text=t("no_contrast"), wraplength=550).pack(anchor="w")
         else:
-            self._zoom_canvas(0.9)
-    
-    def _start_pan(self, event):
-        """開始拖曳"""
-        self.result_canvas.scan_mark(event.x, event.y)
-    
-    def _pan(self, event):
-        """拖曳畫布"""
-        self.result_canvas.scan_dragto(event.x, event.y, gain=1)
-    
+            self.qc_table(page, result.qc)
+        self.pdf_btn.configure(state="normal" if self.figure is not None else "disabled")
+
+    def envelope_notes(self, env, adjusted):
+        if env is None:
+            return []
+        t = self.t
+        notes = []
+        if env.p == env.p:
+            notes.append(t("p_values", p=env.p, adjusted=adjusted))
+        if not (env.lower == env.lower).all():
+            notes.append(t("masked_scales"))
+        spans = interval_strings(self.results.radii, env.side)
+        if spans:
+            notes.append("  ·  ".join(t("scale_span", direction=t(direction), lo=lo, hi=hi,
+                                        unit=self.results.data.calibration.unit) for direction, lo, hi in spans[:4])
+                         + ("  …" if len(spans) > 4 else ""))
+            if adjusted > .05:
+                notes.append(t("p_family_note"))
+        return notes
+
+    def show_figure(self, parent, figure, notes):
+        self.figure = figure
+        for note in notes:
+            ttk.Label(parent, text=note, wraplength=690, style="Muted.TLabel").pack(fill="x", anchor="w", pady=1)
+        canvas = FigureCanvasTkAgg(figure, master=parent)
+        toolbar = PlotToolbar(canvas, parent, self.t)
+        toolbar.pack(side="bottom", fill="x")
+        canvas.get_tk_widget().pack(fill="both", expand=True, pady=(5, 0))
+        canvas.draw_idle()
+
+    def qc_table(self, parent, records):
+        t = self.t
+        if records.empty:
+            ttk.Label(parent, text=t("no_qc")).pack(anchor="w")
+            return
+        panel = ttk.Frame(parent)
+        panel.pack(fill="both", expand=True)
+        fields = ("name", "row", "sample_id", "roi_id", "reason")
+        tree = ttk.Treeview(panel, columns=fields, show="headings")
+        scroll = ttk.Scrollbar(panel, command=tree.yview)
+        tree.configure(yscrollcommand=scroll.set)
+        scroll.pack(side="right", fill="y")
+        tree.pack(fill="both", expand=True)
+        for field, width in zip(fields, (130, 58, 75, 68, 350)):
+            tree.column(field, width=width, minwidth=45, stretch=field == "reason")
+            tree.heading(field, text=t(field))
+        if len(records) > 250:
+            ttk.Label(parent, text=t("qc_limit", count=len(records)), style="Muted.TLabel").pack(anchor="w")
+        columns = ["source", "row", "sample_id", "roi_id", "reason"]
+        for source, row, sample, roi, reason in records.head(250).reindex(columns=columns).fillna("").itertuples(index=False, name=None):
+            tree.insert("", "end", values=(Path(source).name if source else "", row, sample, roi, t(reason)))
+
+    def export_pdf(self):
+        if self.figure is None:
+            return
+        t = self.t
+        filename = filedialog.asksaveasfilename(parent=self.root, title=t("pdf"), initialfile="spatial-pattern.pdf",
+                                                defaultextension=".pdf", filetypes=[("PDF", "*.pdf")])
+        if filename:
+            try:
+                save_pdf(self.figure, filename, t("title"))
+                self.set_status("saved", file=Path(filename).name)
+            except Exception as error:
+                show_error(self.root, t, error)
+
     def clear_results(self):
-        """Clear analysis results"""
-        self.results = None
-        
-        # Remove result tabs
-        for tab_id in self.notebook.tabs()[1:]:  # Keep welcome tab
-            self.notebook.forget(tab_id)
-        
-        # Switch to welcome tab
-        self.notebook.select(0)
-        
-        self.progress_var.set("Results cleared")
-    
-    def export_results(self):
-        """Export analysis results"""
+        if self.job is None:
+            self.results = None
+            self.set_status("ready")
+            self.render_main()
+
+    def export_tables(self):
         if self.results is None:
-            messagebox.showerror("Error", "No results to export.")
             return
-        
-        filename = filedialog.asksaveasfilename(
-            defaultextension=".png",
-            filetypes=[("PNG files", "*.png"), ("PDF files", "*.pdf"), ("All files", "*.*")]
-        )
-        
+        t = self.t
+        filename = filedialog.asksaveasfilename(parent=self.root, title=t("data_export"), initialfile="spatial-results.xlsx",
+                                                defaultextension=".xlsx", filetypes=[("Excel", "*.xlsx"), ("CSV (ZIP)", "*.zip")])
         if filename:
             try:
-                # Create and save the plot
-                fig = self.analyzer.plot_results(self.results, "Exported Analysis Results")
-                fig.savefig(filename, dpi=300, bbox_inches='tight')
-                messagebox.showinfo("Success", f"Results exported to {filename}")
-            except Exception as e:
-                messagebox.showerror("Error", f"Failed to export results:\n{str(e)}")
-    
-    def show_about(self):
-        """Show about dialog"""
-        about_text = """
-Spatial Pattern Analysis Tool
-Version 1.0
+                export_data(self.results, filename)
+                self.set_status("saved", file=Path(filename).name)
+            except Exception as error:
+                show_error(self.root, t, error)
 
-A GUI application for analyzing spatial point patterns using Ripley's K and L functions.
+    def methods(self):
+        t = self.t
+        dialog = modal(self.root, t("methods"))
+        dialog.geometry("800x625")
+        base = frame(dialog)
+        from tkinter.scrolledtext import ScrolledText
 
-Features:
-- Support for CSV and Excel files
-- Flexible column mapping
-- Multiple pattern analysis
-- Interactive visualization
+        text = ScrolledText(base, wrap="word", padx=13, pady=11, bg=WHITE, fg=INK, relief="flat")
+        text.pack(fill="both", expand=True)
+        document = ASSETS / ("README.zh-TW.md" if t.lang == "zh-TW" else "README.md")
+        text.insert("1.0", document.read_text(encoding="utf-8-sig"))
+        text.configure(state="disabled")
+        ttk.Button(base, text=t("close"), command=dialog.destroy).pack(anchor="e", pady=(8, 0))
 
-Created using Python, tkinter, and matplotlib.
-        """
-        messagebox.showinfo("About", about_text)
 
-    def export_figure(self):
-        """Export current figure as image file"""
-        if self.results is None:
-            messagebox.showerror("錯誤", "沒有可用的分析結果。")
-            return
-            
-        filename = filedialog.asksaveasfilename(
-            defaultextension=".png",
-            filetypes=[
-                ("PNG files", "*.png"),
-                ("PDF files", "*.pdf"),
-                ("SVG files", "*.svg"),
-                ("All files", "*.*")
-            ],
-            title="儲存圖片"
-        )
-        
-        if filename:
-            try:
-                # 創建高解析度圖形
-                fig = self.analyzer.plot_results(self.results, "Analysis Results")
-                fig.set_dpi(300)
-                
-                # 保存圖片
-                fig.savefig(filename, dpi=300, bbox_inches='tight')
-                plt.close(fig)
-                
-                messagebox.showinfo("成功", f"圖片已儲存至：\n{filename}")
-            except Exception as e:
-                messagebox.showerror("錯誤", f"儲存圖片時發生錯誤：\n{str(e)}")
-                if 'fig' in locals():
-                    plt.close(fig)
+def smoke_test(path):
+    path.mkdir(parents=True, exist_ok=True)
+    try:
+        import xlrd
 
-    def export_data(self):
-        """Export analysis data as CSV file"""
-        if self.results is None:
-            messagebox.showerror("錯誤", "沒有可用的分析結果。")
-            return
-            
-        filename = filedialog.asksaveasfilename(
-            defaultextension=".csv",
-            filetypes=[
-                ("CSV files", "*.csv"),
-                ("Excel files", "*.xlsx"),
-                ("All files", "*.*")
-            ],
-            title="儲存分析數據"
-        )
-        
-        if filename:
-            try:
-                # Prepare data for export
-                export_data = []
-                
-                for pattern_name, pattern_data in self.results.items():
-                    for cell_type, type_data in pattern_data.items():
-                        # Get Ripley results
-                        ripley_result = type_data['ripley_result']
-                        local_analysis = type_data['local_analysis']
-                        
-                        # Create data rows
-                        for i, (radius, k_value, l_value) in enumerate(zip(
-                            ripley_result.radii,
-                            ripley_result.k_values,
-                            ripley_result.l_values
-                        )):
-                            export_data.append({
-                                'Pattern': pattern_name,
-                                'Cell_Type': cell_type,
-                                'Radius': radius,
-                                'K_Value': k_value,
-                                'L_Value': l_value,
-                                'Cell_Count': type_data['cell_count']
-                            })
-                
-                # Convert to DataFrame
-                df = pd.DataFrame(export_data)
-                
-                # Save based on file extension
-                file_ext = Path(filename).suffix.lower()
-                if file_ext == '.csv':
-                    df.to_csv(filename, index=False)
-                elif file_ext == '.xlsx':
-                    df.to_excel(filename, index=False)
-                else:
-                    df.to_csv(filename, index=False)
-                
-                messagebox.showinfo("成功", f"分析數據已儲存至：\n{filename}")
-            except Exception as e:
-                messagebox.showerror("錯誤", f"儲存數據時發生錯誤：\n{str(e)}")
+        assert xlrd.__version__
+        root = tk.Tk()
+        root.withdraw()
+        app = SpatialAnalysisGUI(root)
+        app.data = demo_data()
+        app.results = run_analysis(app.data, Settings(roi_mode="rectangle", simulations=19))
+        for lang in ("en", "zh-TW"):
+            t = Translator(lang)
+            save_pdf(group_figure(app.results, "", t), path / f"groups-{lang}.pdf", t("title"))
+        export_data(app.results, path / "results.xlsx")
+        root.update_idletasks()
+        root.destroy()
+    except Exception:
+        from traceback import format_exc
+
+        (path / "error.txt").write_text(format_exc(), encoding="utf-8")
+        raise SystemExit(1) from None
+
 
 def main():
-    """Main application entry point"""
+    if len(sys.argv) == 3 and sys.argv[1] == "--smoke-test":
+        smoke_test(Path(sys.argv[2]))
+        return
+    if len(sys.argv) != 1:
+        raise SystemExit("Usage: spatial_analysis_gui.py [--smoke-test OUTPUT_DIRECTORY]")
     root = tk.Tk()
-    app = SpatialAnalysisGUI(root)
-    
-    # Set minimum window size
-    root.minsize(800, 600)
-    
-    # Center window on screen
-    root.update_idletasks()
-    x = (root.winfo_screenwidth() // 2) - (root.winfo_width() // 2)
-    y = (root.winfo_screenheight() // 2) - (root.winfo_height() // 2)
-    root.geometry(f"+{x}+{y}")
-    
-    # Start the application
+    root.geometry("1200x790")
+    root.minsize(920, 650)
+    language = locale.getlocale()[0] or ""
+    zh = language.casefold().startswith(("zh_tw", "zh_hk", "chinese (traditional)"))
+    SpatialAnalysisGUI(root, "zh-TW" if zh else "en")
     root.mainloop()
+
 
 if __name__ == "__main__":
     main()

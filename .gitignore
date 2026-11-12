@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+.release-venv/
+.release-py314/
+.release-checkout/
+.build/
+.builddeps/
+.smoke/
+dist/

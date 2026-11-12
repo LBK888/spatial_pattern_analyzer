@@ -1,117 +1,56 @@
-# 空間模式分析工具 (Spatial Pattern Analysis Tool)
+# Spatial Pattern Analyzer
 
-這是一個用於分析空間點模式分布的圖形化工具，基於 Ripley's K 和 L 函數進行分析。本工具提供直觀的圖形介面，讓使用者能夠輕鬆地分析空間數據中的聚集、分散或隨機分布模式。
+[繁體中文說明](README.zh-TW.md) · [Windows downloads](https://github.com/LBK888/spatial_pattern_analyzer/releases) · [BibTeX](CITATION.bib)
 
-## 功能特點
+Analyze two-dimensional point locations in an observation window with Ripley's K and L. The desktop interface and PDF figures are available in English and Traditional Chinese.
 
-- 支援多種檔案格式（CSV、Excel）
-- 靈活的欄位映射設定
-- 多種空間模式分析（原始、隨機、聚集、規則）
-- 互動式視覺化結果
-- 高解析度圖表輸出
-- 分析結果匯出功能
-- 支援多種細胞類型分析
+## Get started
 
-## 系統需求
+1. Download the Windows x64 EXE from Releases and open it. For a source installation, use Python 3.10 or later with Tk, run setup.bat, then start.bat.
+2. Click **Try demo**, then **Run analysis**. The bundled synthetic data contain 9 independent samples, 18 ROIs, and 1,296 points across uniform, clustered and regular groups. Each group has N=3. The point types A and B are randomly assigned within ROIs. Actual rectangular bounds are supplied in the table.
+3. Open **Groups** to compare curves and between-sample variation. Select a view in **ROI detail** to inspect its point map and null envelope. **Quality control** lists input and analysis exclusions. Click ⓘ next to a setting for help.
 
-- Windows 作業系統
-- Python 3.10 或更新版本
-- 至少 4GB RAM
-- 建議螢幕解析度 1920x1080 或更高
+## Data and observation windows
 
-## 安裝說明
+CSV, TSV, TXT, XLSX and XLS are supported. Map X/Y and, when available, sample_id, roi_id, cell_type and group. Pair and block IDs, plus the rectangle columns xmin, ymin, xmax and ymax, are under More columns. Batch files share the mapped layout and worksheet. If sample ID is omitted, the filename stem identifies an independent sample. If ROI ID is omitted, the file contributes one ROI per sample. Use the original coordinate system for bounds and ROI files. The separate X and Y calibration factors apply to both points and windows. Supply a physical minimum radius if localization or segmentation makes shorter distances unreliable. Image Y orientation controls map display.
 
-1. 確保您的系統已安裝 Python 3.8 或更新版本
-2. 下載本專案的所有檔案
-3. 執行 `setup.bat` 進行環境設定與套件安裝
-4. 安裝完成後，執行 `start.bat` 啟動程式
+The four ROI modes answer different questions:
 
-## 使用說明
+- **Infer from points** uses a concave hull. The hull looseness is configurable. The location of the hull depends on the observations, so the point-location curve is descriptive. Fixed-location random-label tests remain available.
+- **Infer and fix boundary points** uses a convex hull. In each conditional CSR simulation all observed hull-boundary positions stay fixed, and only interior positions are redrawn uniformly. This conditional model assumes continuous uniform sampling over a convex support and addresses the interior arrangement conditional on the observed hull. Choose a known ROI to test the whole observed window, especially with concave sampling regions or image masks. Very few interior points, coincident points and per-type curves in this mode have descriptive results.
+- **Rectangle** uses the four table columns for each ROI when present and valid, or manually entered bounds as a common fallback. Use actual acquisition or crop bounds.
+- **Custom ROI** accepts planar WKT, GeoJSON polygons or multipolygons (including holes), binary PNG/TIFF masks, and polygons drawn in the app. A GeoJSON FeatureCollection can identify a window with sample_id and roi_id properties. A feature with neither property, a single WKT, or an image mask is a common window. Nonzero mask pixels are inside. Enter the origin of the upper-left pixel edge in the original coordinates. Drawn polygons are associated with the selected ROI.
 
-### 1. 載入數據
+The importer reports nonfinite coordinates, missing identifiers, coincident points, and points outside the ROI. Coincident points are kept by default. An optional policy removes repeated positions of the same type within each sample and ROI. An exactly coincident pattern can be described and can be tested by random labeling; continuous-position CSR is withheld. Record numbers identify logical table records.
 
-- 點擊「Open File」按鈕選擇數據檔案
-- 支援的檔案格式：CSV、Excel (.xlsx, .xls)
-- 在預覽視窗中設定欄位映射：
-  - X 座標欄位
-  - Y 座標欄位
-  - 細胞類型欄位（可選）
+## Analysis and interpretation
 
-### 2. 分析設定
+- **K and L.** Rectangles use translation correction and ordered distinct pairs with n(n−1) normalization. Other shapes use border correction with focal points at least r from the boundary, including hole boundaries. Unsupported radii are missing. Default maximum distance is one quarter of the shorter bounding-box dimension, capped further for irregular windows based on interior clearance. Runs use a common physical radius grid. K has squared distance units, L = sqrt(K/π), and plots display L(r) − r.
+- **Global pattern test.** Fixed-count CSR places the observed number of points independently and uniformly within the known ROI. Each observed and simulated curve uses the same estimator. The two-sided 95% global extreme rank length envelope controls the selected radius family, with ties handled conservatively. The default is 999 simulations with a reproducible seed. The raw global p and Holm-adjusted p are shown separately. Use adjusted p when interpreting the family of tests from a run. Excursions indicate scales with more or fewer close pairs under the chosen model. Failure to reject expresses the available evidence. Report the radius range and chosen null along with the result.
+- **Inhomogeneity and labels.** For known rectangular windows, a positive numeric CSV matrix can specify an independently measured relative intensity on equal-sized cells. Rows run from low to high Y. The grid applies to each rectangle in normalized coordinates. Simulation uses the fixed grid, and pair contributions are intensity reweighted. The model assumes this external intensity is fixed. For cross-type K, coordinates are held fixed and the chosen two labels are permuted within each ROI with their counts preserved. Interpret its curve against the random-label envelope, particularly when the pooled locations have a spatial gradient.
+- **Replicates.** Analyze ROIs first. Within a sample average the available ROI curves at each radius, then give each independent sample equal weight within its group. Plot individual sample curves, group means and effective N(r). The default band is ± one sample SD; the optional 95% percentile bootstrap CI is pointwise, resampling whole sample curves at radii supported by all samples and with N≥3. The null envelope serves the separate purpose of model testing. With one sample, there is no sample variability band.
+- **Group contrast.** The curve is mean A minus mean B at jointly supported radii. The permutation test shuffles independent sample labels within block, or swaps conditions within matched pairs, according to the selected study design. This implementation uses the raw mean difference curve with global rank calibration. It requires exchangeable labels within blocks or pairs under the null. Use the exported Holm p when interpreting several contrasts by type.
+- **Local map.** The optional radius shows each point's neighbor count minus its uniform expectation in the intersection of its search disk and the ROI. It is a descriptive map, with a color scale centered at zero. The disk area is approximated by a 96-sided polygon. This map applies to univariate curves under a uniform reference.
 
-- 選擇要分析的空間模式類型：
-  - Original：原始分布
-  - Random：隨機分布
-  - Cluster：聚集分布
-  - Regular：規則分布
-- 設定分析參數：
-  - Scan Scope：掃描範圍
-  - Shrink Factor：收縮因子
-  - Number of Radii：半徑數量
+## Export and reproduce
 
-### 3. 執行分析
+**Export PDF** saves the current figure with vector lines and embedded searchable fonts. It is designed for editing plot text in vector/PDF editors. Windows uses installed Traditional Chinese fonts. **Export data** saves an Excel workbook or a ZIP of UTF-8 CSV tables. curves contains ROI, sample, group and contrast curves. summary holds tests and excursions. metadata captures settings, import mapping, calibration, versions and seeds. roi includes window WKT, qc records excluded or flagged observations, and local contains optional neighbor deviations. The exported seed, data order, settings and software versions allow Monte Carlo runs to be reproduced.
 
-- 點擊「Run Analysis」開始分析
-- 分析結果將顯示在右側面板
-- 可使用滑鼠滾輪進行縮放
-- 支援拖曳平移視圖
+For a paper, report the observation window and calibration, edge correction, independent sample and ROI counts, analysis radii, chosen null model, simulation count, and multiple-testing correction.
 
-### 4. 匯出結果
+## Methods and citations
 
-- 點擊「Export Figure」匯出圖表
-- 支援的格式：PNG、PDF、SVG
-- 點擊「Export Results」匯出分析數據
-- 支援的格式：CSV、Excel
+| Reference | Where it is used |
+|---|---|
+| [Ripley (1976), The second-order analysis of stationary point processes](https://doi.org/10.2307/3212829) and [Besag (1977), discussion of Ripley's Modelling spatial patterns](https://doi.org/10.1111/j.2517-6161.1977.tb01616.x) | K, border correction and the square-root L transformation. Plots center L by subtracting r. |
+| [Ohser (1983), On estimators for the reduced second moment measure of point processes](https://doi.org/10.1080/02331888308801687) | Translation edge weights for rectangles. |
+| [Myllymäki et al. (2017), Global envelope tests for spatial processes](https://doi.org/10.1111/rssb.12172) and [Myllymäki & Mrkvička (2024), GET: Global Envelopes in R](https://doi.org/10.18637/jss.v111.i03) | Global Monte Carlo and permutation testing with extreme rank length. The app implements this method in Python. |
+| [Holm (1979), A simple sequentially rejective multiple test procedure](https://www.jstor.org/stable/4615733) | Adjusts ROI p values and group-contrast p values in separate families. |
+| [Baddeley, Møller & Waagepetersen (2000), Non- and semi-parametric estimation of interaction in inhomogeneous point patterns](https://doi.org/10.1111/1467-9574.00144) | Inverse-intensity pair weighting. The app uses an external grid and fixed-count normalization. |
+| [Diggle, Mateu & Clough (2000), A comparison between parametric and non-parametric approaches to the analysis of replicated spatial point patterns](https://doi.org/10.1239/aap/1013540166) and [Efron (1979), Bootstrap methods: Another look at the jackknife](https://doi.org/10.1214/aos/1176344552) | Replicate-level functional summaries and resampling whole independent sample curves. |
+| [spatstat Kcross and rlabel documentation](https://search.r-project.org/CRAN/refmans/spatstat.explore/html/Kcross.html) · [rlabel](https://search.r-project.org/CRAN/refmans/spatstat.random/html/rlabel.html) | Cross-type K and the fixed-position, fixed-count random-label null. |
+| [GEOS 3.11 ConcaveHull](https://libgeos.org/posts/2022-07-01-geos-3-11-0-released/) and [Shapely concave_hull](https://shapely.readthedocs.io/en/stable/reference/shapely.concave_hull.html) | Delaunay-based point-inferred ROI. Conditional simulation in fixed-boundary mode uses the convex hull; interior points conditional on the fixed observed hull are uniform under the stated convex-support null. |
 
-## 關鍵演算法說明
+## Build on Windows
 
-### Ripley's K 函數
-
-Ripley's K 函數是空間點模式分析中最常用的方法之一，用於評估點在不同空間尺度下的分布特徵：
-
-\[ K(r) = \frac{A}{n^2} \sum_{i=1}^{n} \sum_{j=1}^{n} I(d_{ij} \leq r) \]
-
-其中：
-- A 是研究區域的面積
-- n 是點的數量
-- d_{ij} 是點 i 和點 j 之間的距離
-- I() 是指示函數
-
-### Ripley's L 函數
-
-L 函數是 K 函數的變形，用於更容易解釋結果：
-
-\[ L(r) = \sqrt{\frac{K(r)}{\pi}} - r \]
-
-L 函數的解釋：
-- L(r) > 0：表示在距離 r 處有聚集
-- L(r) < 0：表示在距離 r 處有分散
-- L(r) = 0：表示在距離 r 處為隨機分布
-
-## 注意事項
-
-1. 數據檔案必須包含有效的座標資訊
-2. 座標值應為數值型態
-3. 建議數據量不要超過 100,000 點
-4. 分析大量數據時可能需要較長時間
-
-## 常見問題
-
-1. Q: 為什麼我的圖表顯示不完整？
-   A: 請使用滑鼠滾輪進行縮放，或使用拖曳功能移動視圖。
-
-2. Q: 如何正確設定欄位映射？
-   A: 在預覽視窗中，選擇包含 X、Y 座標的欄位，如果有細胞類型資訊，也請選擇相應欄位。
-
-3. Q: 分析結果如何解釋？
-   A: 請參考「關鍵演算法說明」部分，了解 L 函數的解釋方式。
-
-## 授權說明
-
-本軟體採用 MIT 授權條款。詳見 LICENSE 檔案。
-
-## 聯絡資訊
-
-如有任何問題或建議，請透過以下方式聯絡：
-- 電子郵件：liaobk@email.ntou.edu.tw
-- Lab Web page： http://lbk.tw/
+Install requirements.txt and PyInstaller into an isolated 64-bit Python environment, then run build-windows.ps1 with -Python pointing to that interpreter. The build runs the test suite, checks the packaged demo and bilingual PDF/Excel outputs, and writes SHA256.txt beside the EXE. MIT license.
