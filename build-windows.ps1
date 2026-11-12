@@ -10,7 +10,7 @@ try {
     $buildArgs = @(
         "--noconfirm", "--clean", "--onefile", "--windowed", "--name", "SpatialPatternAnalyzer-Windows-x64",
         "--distpath", $Output, "--workpath", ".build/pyinstaller", "--specpath", ".build",
-        "--hidden-import", "xlrd",
+        "--hidden-import", "xlrd", "--hidden-import", "matplotlib.backends.backend_pdf",
         "--add-data", "$PSScriptRoot/demo/points.csv:demo", "--add-data", "$PSScriptRoot/README.md:.",
         "--add-data", "$PSScriptRoot/README.zh-TW.md:.", "--add-data", "$PSScriptRoot/CITATION.bib:.",
         "--add-data", "$PSScriptRoot/LICENSE:.",
