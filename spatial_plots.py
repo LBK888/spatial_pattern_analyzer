@@ -11,9 +11,10 @@ from matplotlib.text import Text
 import numpy as np
 
 from ripley_analysis import boundary_points
+from spatial_workflow import with_band
 
 
-PALETTE = ["#1A6FB5", "#0D8F6B", "#9B3072", "#B45309", "#6D3BBF", "#C4211C", "#0E7490"]
+PALETTE = ["#1A6FB5", "#0D8F6B", "#9B3072", "#B45309", "#6D3BBF", "#C4211C", "#0E7490", "#4D7C0F", "#BE185D"]
 INK, MUTED, GRID = "#172c3c", "#526779", "#e2e9ee"
 
 
@@ -63,30 +64,77 @@ def select_indices(n, max_points=12000):
             np.sort(np.random.default_rng(2026).choice(n, max_points, replace=False)))
 
 
-def group_figure(results, label, t):
-    fig = Figure(figsize=(8.7, 5.1), layout="constrained")
+def _series_labels_and_title(summaries, t, fallback_title=""):
+    if not summaries:
+        return [], fallback_title or t("all")
+    distinct_labels = {s.label for s in summaries}
+    distinct_groups = {s.group for s in summaries}
+    has_custom_id = any(bool(s.series_id) for s in summaries)
+    if not has_custom_id and len(distinct_labels) == 1:
+        lbl = next(iter(distinct_labels))
+        names = [s.group or t("all") for s in summaries]
+        title = lbl or t("all")
+    elif not has_custom_id and len(distinct_groups) == 1:
+        grp = next(iter(distinct_groups))
+        names = [s.label or t("all") for s in summaries]
+        title = grp or t("all")
+    else:
+        names = [s.format_name(t("all")) for s in summaries]
+        title = fallback_title or t("selected_groups")
+    return names, title
+
+
+def group_figure(results, label_or_summaries, t, band=None, show_samples=True, omnibus=None, title_override=""):
+    fig = Figure(figsize=(8.8, 5.15), layout="constrained")
     ax, n_axis = fig.subplots(2, 1, sharex=True, gridspec_kw={"height_ratios": [4, 1]})
     r = results.radii
     unit = results.data.calibration.unit
-    summaries = [s for s in results.summaries if s.label == label]
+    active_band = results.settings.band if band is None else band
+    if isinstance(label_or_summaries, str):
+        raw_summaries = [s for s in results.summaries if s.label == label_or_summaries]
+        fallback = label_or_summaries or t("all")
+    else:
+        raw_summaries = list(label_or_summaries)
+        fallback = title_override or t("selected_groups")
+    summaries = [
+        with_band(s, active_band, results.settings.seed) if active_band != results.settings.band else s
+        for s in raw_summaries
+    ]
+    series_names, group_title = _series_labels_and_title(summaries, t, fallback)
+    if title_override:
+        group_title = title_override
     ax.axhline(0, color=MUTED, linestyle="--", linewidth=.9)
     n_max = 1
-    for i, summary in enumerate(summaries):
+    for i, (summary, base_name) in enumerate(zip(summaries, series_names)):
         color = PALETTE[i % len(PALETTE)]
         linestyle = ("-", "--", ":", "-.")[i // len(PALETTE) % 4]
-        n_max = max(n_max, int(summary.n.max()))
-        n_label = str(summary.n[0]) if np.all(summary.n == summary.n[0]) else f"{summary.n.min()}–{summary.n.max()}"
-        name = f"{summary.group or t('all')} (N={n_label})"
-        ax.plot(r, summary.curves.T, color=color, linewidth=.7, alpha=.2)
-        ax.fill_between(r, summary.low, summary.high, color=color, alpha=.15, linewidth=0)
-        ax.plot(r, summary.mean, label=name, color=color, linestyle=linestyle, linewidth=2.1)
+        n_max = max(n_max, int(summary.n.max()) if len(summary.n) else 1)
+        n_label = (str(int(summary.n[0])) if len(summary.n) and np.all(summary.n == summary.n[0])
+                   else f"{int(summary.n.min())}–{int(summary.n.max())}")
+        name = f"{base_name} (N={n_label})"
+        if show_samples and len(summary.curves):
+            ax.plot(r, summary.curves.T, color=color, linewidth=.65, alpha=.18)
+        if active_band != "off" and np.isfinite(summary.low).any():
+            ax.fill_between(r, summary.low, summary.high, color=color, alpha=.16, linewidth=0)
+        ax.plot(r, summary.mean, label=name, color=color, linestyle=linestyle, linewidth=2.15)
         n_axis.step(r, summary.n, where="mid", color=color, linestyle=linestyle, linewidth=1.5)
-    band = results.settings.band
-    band_present = any(np.isfinite(s.low).any() for s in summaries)
-    ax.set_title(f"{t('view_groups')}  ·  {label or t('all')}" + (f"  ·  {t(band)}" if band_present else ""), loc="left")
+    if omnibus is not None and omnibus.envelope is not None and np.any(omnibus.envelope.side != 0):
+        sig_mask = omnibus.envelope.side != 0
+        for direction, start, end in omnibus.significant_spans:
+            pad = (r[1] - r[0]) * 0.45 if len(r) > 1 else 0.5
+            ax.axvspan(max(0.0, start - pad), end + pad, color="#FEF3C7", alpha=0.35, zorder=0, linewidth=0)
+        if sig_mask.any():
+            ax.plot([], [], color="#D97706", linewidth=5, alpha=0.45, label=t("sig_r_bar"))
+    band_present = active_band != "off" and any(np.isfinite(s.low).any() for s in summaries)
+    title_parts = [t("view_groups"), group_title]
+    if band_present:
+        title_parts.append(t(active_band))
+    if omnibus is not None and np.isfinite(omnibus.p_global):
+        title_parts.append(f"Global p = {omnibus.p_global:.4g}")
+    ax.set_title("  ·  ".join(title_parts), loc="left", fontsize=10.5)
     ax.set_ylabel(f"L(r) − r ({unit})")
     if summaries:
-        ax.legend(loc="best", fontsize=8, ncol=2, frameon=False)
+        ax.legend(loc="best", fontsize=8, ncol=2 if len(summaries) > 3 else 1, frameon=False)
     n_axis.set_ylim(-.05, n_max + .5)
     n_axis.set_yticks(sorted({0, n_max // 2, n_max}))
     n_axis.set_ylabel("N")
@@ -148,7 +196,7 @@ def roi_figure(results, pattern, t):
 
 
 def contrast_figure(results, contrast, t):
-    fig = Figure(figsize=(8.7, 5), layout="constrained")
+    fig = Figure(figsize=(8.7, 4.4), layout="constrained")
     ax = fig.subplots()
     env = contrast.envelope
     ax.axhline(0, color=MUTED, linestyle="--", linewidth=.9)
@@ -157,8 +205,9 @@ def contrast_figure(results, contrast, t):
     ax.plot(results.radii, contrast.effect, color=PALETTE[0], linewidth=2.1, label=t("estimate"))
     for sign, color in ((1, "#C05621"), (-1, "#6D3BBF")):
         out = env.side == sign
-        ax.scatter(results.radii[out], contrast.effect[out], s=14, color=color)
-    ax.set_title(f"{contrast.a} − {contrast.b}  ·  {contrast.label or t('all')}", loc="left")
+        ax.scatter(results.radii[out], contrast.effect[out], s=15, color=color, zorder=5)
+    suffix = f"  ·  {contrast.label}" if contrast.label and contrast.label != f"{contrast.a} vs {contrast.b}" else ""
+    ax.set_title(f"{contrast.a} − {contrast.b}{suffix}", loc="left")
     ax.set_xlabel(t("radius", unit=results.data.calibration.unit))
     ax.set_ylabel(t("effect", unit=results.data.calibration.unit))
     ax.legend(loc="best", fontsize=8, frameon=False)
@@ -169,9 +218,43 @@ def contrast_figure(results, contrast, t):
     return fig
 
 
+def omnibus_figure(results, omnibus, t):
+    fig = Figure(figsize=(8.7, 4.4), layout="constrained")
+    ax = fig.subplots()
+    r = results.radii
+    env = omnibus.envelope
+    ax.fill_between(r, 0, env.upper, color="#A3C8E8", alpha=.4, label=t("omnibus_envelope_label"), linewidth=0)
+    ax.plot(r, omnibus.statistic_curve, color=PALETTE[0], linewidth=2.1, label=t("estimate"))
+    out = env.side > 0
+    if out.any():
+        ax.scatter(r[out], omnibus.statistic_curve[out], s=16, color="#C05621", zorder=5)
+    ax.set_title(t("omnibus_title", k=omnibus.k_groups), loc="left")
+    ax.set_xlabel(t("radius", unit=results.data.calibration.unit))
+    ax.set_ylabel(t("omnibus_ylabel"))
+    ax.legend(loc="best", fontsize=8, frameon=False)
+    if np.isfinite(omnibus.p_global):
+        fig.suptitle(f"Global p = {omnibus.p_global:.4g}  ·  {t('design_tag_' + omnibus.design)}", color=INK, fontsize=10)
+    style(ax)
+    use_cjk_font(fig, t)
+    return fig
+
+
 def save_pdf(figure, filename, title):
+    save_figure(figure, filename, title)
+
+
+def save_figure(figure, filename, title):
     path = Path(filename)
-    with TemporaryDirectory(dir=path.parent) as tmp, matplotlib.rc_context({"pdf.fonttype": 42}):
+    ext = path.suffix.lower()
+    fmt = "svg" if ext == ".svg" else "png" if ext == ".png" else "pdf"
+    rc = {"pdf.fonttype": 42, "svg.fonttype": "none"}
+    kwargs = {"format": fmt}
+    if fmt == "pdf":
+        kwargs["metadata"] = {"Title": title, "Creator": "Spatial Pattern Analyzer"}
+    elif fmt == "png":
+        kwargs["dpi"] = 300
+        kwargs["facecolor"] = "white"
+    with TemporaryDirectory(dir=path.parent) as tmp, matplotlib.rc_context(rc):
         target = Path(tmp) / path.name
-        figure.savefig(target, format="pdf", metadata={"Title": title, "Creator": "Spatial Pattern Analyzer"})
+        figure.savefig(target, **kwargs)
         target.replace(path)

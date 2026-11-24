@@ -1,40 +1,278 @@
-"""Tk desktop application for two-dimensional point-pattern analysis."""
+"""PyQt6 desktop application for two-dimensional point-pattern analysis."""
 from __future__ import annotations
 
-from dataclasses import replace
-import locale
+import os
 from pathlib import Path
-from queue import Empty, Queue
 import sys
-from threading import Event, Thread
-import tkinter as tk
-from tkinter import filedialog, ttk
 
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+if __name__ == "__main__" and len(sys.argv) == 3 and sys.argv[1] == "--smoke-test":
+    _SMOKE_DIR = Path(sys.argv[2].strip('"'))
+    _SMOKE_DIR.mkdir(parents=True, exist_ok=True)
+else:
+    _SMOKE_DIR = None
 
-from i18n import Translator
-from ripley_analysis import Cancelled, make_window
-from spatial_data import (RECT_COLUMNS, Calibration, ReadOptions, column_labels, infer_mapping,
-                          load_custom_roi, load_dataset, read_table)
-from spatial_dialogs import (ImportDialog, advanced_dialog, buttons, entry, frame, geometry_dialog,
-                             help_button, modal, number, show_error)
-from spatial_plots import contrast_figure, group_figure, roi_figure, save_pdf, select_indices
-from spatial_workflow import Settings, VERSION, export_data, interval_strings, run_analysis
+try:
+    from dataclasses import replace
+    import locale
+    from threading import Event
+
+    import numpy as np
+    from PyQt6.QtCore import Qt, QThread, pyqtSignal
+    from PyQt6.QtGui import QFont, QKeySequence, QShortcut
+    from PyQt6.QtWidgets import (
+        QAbstractItemView,
+        QApplication,
+        QCheckBox,
+        QComboBox,
+        QFileDialog,
+        QFrame,
+        QHBoxLayout,
+        QHeaderView,
+        QLabel,
+        QLineEdit,
+        QMainWindow,
+        QProgressBar,
+        QPushButton,
+        QScrollArea,
+        QTabWidget,
+        QTableWidget,
+        QTableWidgetItem,
+        QVBoxLayout,
+        QWidget,
+    )
+    from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+
+    from i18n import Translator
+    from ripley_analysis import Cancelled, make_window
+    from spatial_data import (
+        Calibration,
+        ReadOptions,
+        column_labels,
+        infer_mapping,
+        load_custom_roi,
+        load_dataset,
+        read_table,
+    )
+    from spatial_dialogs import (
+        ImportDialog,
+        PlotToolbar,
+        advanced_dialog,
+        geometry_dialog,
+        help_button,
+        mask_origin_dialog,
+        methods_dialog,
+        parse_number,
+        rectangle_dialog,
+        series_selector_dialog,
+        show_error,
+    )
+    from spatial_plots import (
+        contrast_figure,
+        group_figure,
+        omnibus_figure,
+        roi_figure,
+        save_figure,
+        save_pdf,
+        select_indices,
+    )
+    from spatial_workflow import (
+        Settings,
+        VERSION,
+        build_natural_presets,
+        compare_series,
+        default_fixed_grid,
+        export_batch_bundle,
+        export_data,
+        interval_strings,
+        run_analysis,
+        sorted_types,
+        with_band,
+    )
+except BaseException:
+    if _SMOKE_DIR is not None:
+        from traceback import format_exc
+
+        (_SMOKE_DIR / "error.txt").write_text(format_exc(), encoding="utf-8")
+        raise SystemExit(1) from None
+    raise
 
 
 ASSETS = Path(__file__).resolve().parent
 MODES = ("infer", "locked", "rectangle", "custom")
+EDGE_CHOICES = ("auto", "translation", "isotropic", "border")
+EDGE_LABELS = ("edge_auto", "edge_translation", "edge_isotropic", "edge_border")
+MARKS_MODES = ("all", "each", "each_and_merged", "cross", "cross_all")
 VIEWS = ("view_groups", "view_roi", "view_contrast", "view_qc")
-BG, WHITE, INK, MUTED, ACCENT = "#f3f6f8", "#ffffff", "#172c3c", "#526779", "#1a6fb5"
+BANDS = ("sd", "se", "ci", "off")
+PAIRING_MODES = ("auto", "independent", "paired")
+PERM_STATS = ("welch", "diff")
 
-
-class PlotToolbar(NavigationToolbar2Tk):
-    def __init__(self, canvas, parent, t):
-        names = {"Home": "plot_home", "Back": "plot_back", "Forward": "plot_forward",
-                 "Pan": "plot_pan", "Zoom": "plot_zoom"}
-        self.toolitems = [(name, t(names[name]), icon, method)
-                          for name, _, icon, method in self.toolitems if name in names]
-        super().__init__(canvas, parent, pack_toolbar=False)
+APP_STYLESHEET = """
+QMainWindow, QDialog {
+    background-color: #f3f6f8;
+    color: #172c3c;
+}
+QWidget {
+    color: #172c3c;
+}
+QFrame#CardFrame, QWidget#CardFrame {
+    background-color: #ffffff;
+    border: 1px solid #d9e3eb;
+    border-radius: 8px;
+}
+QLabel#TitleLabel {
+    font-size: 20px;
+    font-weight: 700;
+    color: #172c3c;
+}
+QLabel#HeroTitle {
+    font-size: 23px;
+    font-weight: 700;
+    color: #172c3c;
+    background: transparent;
+}
+QLabel#HeroBody {
+    font-size: 13px;
+    color: #526779;
+    background: transparent;
+}
+QLabel#SectionLabel {
+    font-size: 13px;
+    font-weight: 700;
+    color: #172c3c;
+}
+QLabel#MutedLabel {
+    color: #526779;
+    font-size: 12px;
+}
+QLabel#BannerLabel {
+    background-color: #eaf3fb;
+    border: 1px solid #c6ddf1;
+    border-radius: 6px;
+    padding: 6px 10px;
+    color: #15344d;
+    font-size: 12px;
+}
+QGroupBox {
+    font-weight: 600;
+    border: 1px solid #d5dfe7;
+    border-radius: 6px;
+    margin-top: 8px;
+    padding-top: 10px;
+    background-color: #ffffff;
+}
+QGroupBox::title {
+    subcontrol-origin: margin;
+    left: 10px;
+    padding: 0 4px;
+}
+QPushButton {
+    background-color: #ffffff;
+    border: 1px solid #c5d3dd;
+    border-radius: 5px;
+    padding: 6px 13px;
+    color: #172c3c;
+}
+QPushButton:hover {
+    background-color: #e7f1fa;
+    border-color: #9ab7cd;
+}
+QPushButton:disabled {
+    background-color: #eaeff3;
+    color: #93a4b2;
+    border-color: #d6e0e7;
+}
+QPushButton#SmallBtn {
+    padding: 3px 9px;
+    font-size: 12px;
+}
+QPushButton#PrimaryBtn {
+    background-color: #1a6fb5;
+    border: 1px solid #1a6fb5;
+    color: #ffffff;
+    font-weight: 600;
+}
+QPushButton#PrimaryBtn:hover {
+    background-color: #145b96;
+    border-color: #145b96;
+}
+QPushButton#PrimaryBtn:disabled {
+    background-color: #a1b8ca;
+    border-color: #a1b8ca;
+    color: #ffffff;
+}
+QToolButton#HelpBtn {
+    background: transparent;
+    border: none;
+    color: #1a6fb5;
+    font-weight: 700;
+    padding: 0px 3px;
+}
+QToolButton#HelpBtn:hover {
+    color: #0f4c81;
+}
+QLineEdit, QComboBox {
+    background-color: #ffffff;
+    border: 1px solid #c5d3dd;
+    border-radius: 4px;
+    padding: 4px 7px;
+    min-height: 22px;
+}
+QLineEdit:disabled, QComboBox:disabled {
+    background-color: #edf2f6;
+    color: #8fa0ae;
+}
+QTabWidget::pane {
+    border: 1px solid #d5dfe7;
+    border-radius: 6px;
+    background-color: #ffffff;
+    top: -1px;
+}
+QTabBar::tab {
+    background-color: #e4edf3;
+    border: 1px solid #d5dfe7;
+    border-bottom: none;
+    border-top-left-radius: 6px;
+    border-top-right-radius: 6px;
+    padding: 7px 15px;
+    margin-right: 2px;
+    color: #41586b;
+}
+QTabBar::tab:selected {
+    background-color: #ffffff;
+    color: #172c3c;
+    font-weight: 600;
+}
+QTableWidget {
+    background-color: #ffffff;
+    alternate-background-color: #f8fafc;
+    gridline-color: #e5edf3;
+    border: 1px solid #d5dfe7;
+    border-radius: 5px;
+    selection-background-color: #d9ecfb;
+    selection-color: #172c3c;
+}
+QHeaderView::section {
+    background-color: #eaf0f5;
+    color: #172c3c;
+    font-weight: 600;
+    padding: 5px 7px;
+    border: none;
+    border-right: 1px solid #d5dfe7;
+    border-bottom: 1px solid #d5dfe7;
+}
+QProgressBar {
+    border: 1px solid #c5d3dd;
+    border-radius: 4px;
+    background-color: #ffffff;
+    text-align: center;
+    height: 14px;
+}
+QProgressBar::chunk {
+    background-color: #1a6fb5;
+    border-radius: 3px;
+}
+"""
 
 
 def demo_data():
@@ -45,121 +283,456 @@ def demo_data():
     return load_dataset([path], options, mapping, Calibration(unit="µm"))
 
 
-class SpatialAnalysisGUI:
-    def __init__(self, root, language="en"):
-        self.root, self.t = root, Translator(language)
-        self.data, self.results, self.figure = None, None, None
+class WorkerThread(QThread):
+    progress_changed = pyqtSignal(int, int, int)
+    task_finished = pyqtSignal(int, str, object)
+
+    def __init__(self, job_id: int, work_fn, stop_event: Event, parent=None):
+        super().__init__(parent)
+        self.job_id = job_id
+        self.work_fn = work_fn
+        self.stop_event = stop_event
+
+    def run(self):
+        try:
+            result = self.work_fn(
+                self.job_id,
+                self.stop_event,
+                lambda done, total: self.progress_changed.emit(self.job_id, int(done), int(total)),
+            )
+            if self.stop_event.is_set():
+                self.task_finished.emit(self.job_id, "canceled", None)
+            else:
+                self.task_finished.emit(self.job_id, "success", result)
+        except Cancelled:
+            self.task_finished.emit(self.job_id, "canceled", None)
+        except Exception as error:
+            self.task_finished.emit(self.job_id, "error", error)
+
+
+class SpatialAnalysisGUI(QMainWindow):
+    """Main PyQt6 window for Spatial Pattern Analyzer."""
+
+    def __init__(self, parent_or_lang="en", language: str | None = None):
+        super().__init__(None)
+        if language is not None:
+            lang = language
+        elif isinstance(parent_or_lang, str):
+            lang = parent_or_lang
+        else:
+            lang = "en"
+        self.t = Translator(lang)
+        self.data = None
+        self.results = None
+        self.figure = None
         self.settings = Settings()
         self.dataset_name = ""
-        self.roi_path, self.intensity_path = "", ""
-        self.view, self.selected = "view_groups", {}
-        self.queue, self.job, self.next_job = Queue(), None, 0
-        self.stop = None
+        self.last_import_paths = None
+        self.last_import_state = None
+        self.roi_path = ""
+        self.intensity_path = ""
+        self.view = "view_groups"
+        self.selected: dict[str, int] = {}
+        self.roi_filter_group: str | None = None
+        self.roi_filter_type: str | None = None
+        self.qc_search_text = ""
+        self.active_series = []
+        self.preset_index: int | None = 0
+        self.show_samples = True
+        self.job = None
+        self.worker: WorkerThread | None = None
+        self.next_job = 0
+        self.stop: Event | None = None
         self.status = ("ready", {})
+
+        self._shortcut_open = QShortcut(QKeySequence("Ctrl+O"), self)
+        self._shortcut_open.activated.connect(self.open_data)
+
+        self.resize(1280, 830)
+        self.setMinimumSize(980, 660)
         self.draw_shell()
-        root.after(70, self.poll)
-        root.protocol("WM_DELETE_WINDOW", self.close)
 
     def setup_styles(self):
-        style = ttk.Style(self.root)
-        style.theme_use("clam")
+        app = QApplication.instance()
         family = "Microsoft JhengHei UI" if self.t.lang == "zh-TW" else "Segoe UI"
-        self.root.option_add("*Font", (family, 10))
-        style.configure(".", font=(family, 10), background=BG, foreground=INK)
-        style.configure("TFrame", background=BG)
-        style.configure("TButton", padding=(11, 6), background=WHITE, bordercolor="#c5d3dd", relief="flat")
-        style.map("TButton", background=[("active", "#e7f1fa"), ("disabled", "#e9eff3")])
-        style.configure("Primary.TButton", background=ACCENT, bordercolor=ACCENT, foreground=WHITE)
-        style.map("Primary.TButton", background=[("disabled", "#a1b8ca"), ("active", "#145b96")],
-                  foreground=[("disabled", WHITE), ("active", WHITE)])
-        style.configure("Help.TButton", padding=(1, 0), borderwidth=0, background=BG, foreground=ACCENT)
-        style.configure("Title.TLabel", font=(family, 20, "bold"), foreground=INK)
-        style.configure("Hero.TLabel", font=(family, 24, "bold"), background=WHITE, foreground=INK)
-        style.configure("HeroBody.TLabel", font=(family, 11), background=WHITE, foreground=MUTED)
-        style.configure("Card.TFrame", background=WHITE)
-        style.configure("Section.TLabel", font=(family, 11, "bold"))
-        style.configure("Muted.TLabel", foreground=MUTED)
-        style.configure("TNotebook", background=BG, borderwidth=0, padding=0)
-        style.configure("TNotebook.Tab", padding=(13, 8))
-        style.map("TNotebook.Tab", background=[("selected", WHITE), ("!selected", "#e5edf3")])
-        style.configure("Treeview", background=WHITE, fieldbackground=WHITE, rowheight=27)
-        style.configure("Treeview.Heading", background="#e7eef4", padding=(6, 5))
-        self.root.configure(bg=BG)
+        if app is not None:
+            app.setFont(QFont(family, 10))
+        self.setStyleSheet(APP_STYLESHEET)
+
+    def _preserve_sidebar_draft(self):
+        if hasattr(self, "fixed_r_cb") and self.fixed_r_cb is not None:
+            try:
+                self._collect_sidebar_inputs(strict=False)
+            except Exception:
+                pass
 
     def draw_shell(self):
-        for child in self.root.winfo_children():
-            child.destroy()
-        self.figure = None
+        self._preserve_sidebar_draft()
         self.setup_styles()
-        root, t = self.root, self.t
-        root.title(f"{t('title')}  ·  {VERSION}")
-        header = ttk.Frame(root, padding=(21, 13, 21, 12))
-        header.pack(fill="x")
-        names = ttk.Frame(header)
-        names.pack(side="left")
-        ttk.Label(names, text=t("title"), style="Title.TLabel").pack(anchor="w")
-        ttk.Label(names, text=t("subtitle"), style="Muted.TLabel").pack(anchor="w")
-        languages = ttk.Combobox(header, values=("English", "繁體中文"), width=11, state="readonly")
-        languages.current(t.lang == "zh-TW")
-        languages.pack(side="right", padx=(8, 0))
-        languages.bind("<<ComboboxSelected>>", lambda _: self.switch_language(languages.current()))
-        ttk.Button(header, text=t("methods"), command=self.methods).pack(side="right")
-        self.open_btn = ttk.Button(header, text=t("open"), command=self.open_data)
-        self.open_btn.pack(side="right", padx=8)
-        body = ttk.Frame(root, padding=(20, 0, 20, 0))
-        body.pack(fill="both", expand=True)
-        body.columnconfigure(1, weight=1)
-        body.rowconfigure(0, weight=1)
-        side = ttk.Frame(body, padding=(0, 13, 17, 0), width=275)
-        side.grid(row=0, column=0, sticky="nsw")
-        side.grid_propagate(False)
-        side.pack_propagate(False)
-        ttk.Label(side, text=t("workflow"), style="Section.TLabel").pack(anchor="w")
-        ttk.Separator(side).pack(fill="x", pady=(8, 13))
-        ttk.Label(side, text=t("data"), style="Section.TLabel").pack(anchor="w")
-        self.dataset_label = ttk.Label(side, wraplength=240, justify="left", style="Muted.TLabel")
-        self.dataset_label.pack(fill="x", pady=(4, 8))
-        self.demo_btn = ttk.Button(side, text=t("demo"), command=self.open_demo)
-        self.demo_btn.pack(anchor="w")
-        ttk.Separator(side).pack(fill="x", pady=14)
-        roi_line = ttk.Frame(side)
-        roi_line.pack(fill="x")
-        ttk.Label(roi_line, text=t("roi"), style="Section.TLabel").pack(side="left")
-        help_button(roi_line, t("roi_help")).pack(side="left", padx=4)
-        self.mode = ttk.Combobox(side, values=[t(mode) for mode in MODES], state="readonly", width=28)
-        self.mode.current(MODES.index(self.settings.roi_mode))
-        self.mode.pack(fill="x", pady=(4, 0))
-        self.mode.bind("<<ComboboxSelected>>", self.change_roi)
-        self.roi_note = ttk.Label(side, wraplength=243, justify="left", style="Muted.TLabel")
-        self.roi_note.pack(fill="x", pady=(8, 6))
-        self.roi_buttons = ttk.Frame(side)
-        self.roi_buttons.pack(fill="x")
-        self.advanced_btn = ttk.Button(side, text=t("advanced"), command=self.open_advanced)
-        self.advanced_btn.pack(fill="x", pady=(15, 5))
-        self.run_btn = ttk.Button(side, text=t("run"), style="Primary.TButton", command=self.start)
-        self.run_btn.pack(fill="x", pady=(0, 6))
-        self.cancel_btn = ttk.Button(side, text=t("cancel_job"), command=self.cancel)
-        self.cancel_btn.pack(fill="x")
-        main = ttk.Frame(body)
-        main.grid(row=0, column=1, sticky="nsew")
-        self.main = main
-        footer = ttk.Frame(root, padding=(21, 9))
-        footer.pack(fill="x")
-        self.status_label = ttk.Label(footer, text=t(self.status[0], **self.status[1]), style="Muted.TLabel")
-        self.status_label.pack(side="left")
-        self.progress = ttk.Progressbar(footer, length=185, mode="determinate")
-        self.progress.pack(side="right")
+        t = self.t
+        self.setWindowTitle(f"{t('title')}  ·  {VERSION}")
+        self.figure = None
+
+        central = QWidget()
+        self.setCentralWidget(central)
+        outer = QVBoxLayout(central)
+        outer.setContentsMargins(20, 12, 20, 10)
+        outer.setSpacing(8)
+
+        # Header
+        header = QHBoxLayout()
+        title_col = QVBoxLayout()
+        title_col.setSpacing(1)
+        title_lbl = QLabel(t("title"))
+        title_lbl.setObjectName("TitleLabel")
+        sub_lbl = QLabel(t("subtitle"))
+        sub_lbl.setObjectName("MutedLabel")
+        title_col.addWidget(title_lbl)
+        title_col.addWidget(sub_lbl)
+        header.addLayout(title_col)
+        header.addStretch(1)
+
+        self.open_btn = QPushButton(t("open"))
+        self.open_btn.clicked.connect(self.open_data)
+        header.addWidget(self.open_btn)
+
+        self.reimport_btn = QPushButton(t("reconfigure_import"))
+        self.reimport_btn.clicked.connect(self.reconfigure_import)
+        header.addWidget(self.reimport_btn)
+
+        methods_btn = QPushButton(t("methods"))
+        methods_btn.clicked.connect(self.methods)
+        header.addWidget(methods_btn)
+
+        self.lang_combo = QComboBox()
+        self.lang_combo.addItems(["English", "繁體中文"])
+        self.lang_combo.setCurrentIndex(1 if t.lang == "zh-TW" else 0)
+        self.lang_combo.setFixedWidth(115)
+        self.lang_combo.currentIndexChanged.connect(self.switch_language)
+        header.addWidget(self.lang_combo)
+        outer.addLayout(header)
+
+        # Body: Left scrollable setup sidebar + Right content area
+        body = QHBoxLayout()
+        body.setSpacing(16)
+        outer.addLayout(body, stretch=1)
+
+        side_scroll = QScrollArea()
+        side_scroll.setFixedWidth(312)
+        side_scroll.setWidgetResizable(True)
+        side_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        side_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        side_widget = QWidget()
+        side = QVBoxLayout(side_widget)
+        side.setContentsMargins(0, 4, 8, 4)
+        side.setSpacing(8)
+        side_scroll.setWidget(side_widget)
+        body.addWidget(side_scroll)
+
+        wf_lbl = QLabel(t("workflow"))
+        wf_lbl.setObjectName("SectionLabel")
+        side.addWidget(wf_lbl)
+
+        # Card 1: Dataset
+        ds_card = QFrame()
+        ds_card.setObjectName("CardFrame")
+        ds_layout = QVBoxLayout(ds_card)
+        ds_layout.setContentsMargins(12, 10, 12, 10)
+        ds_hdr = QLabel(t("data"))
+        ds_hdr.setObjectName("SectionLabel")
+        ds_layout.addWidget(ds_hdr)
+        self.dataset_label = QLabel("")
+        self.dataset_label.setWordWrap(True)
+        self.dataset_label.setObjectName("MutedLabel")
+        ds_layout.addWidget(self.dataset_label)
+        self.demo_btn = QPushButton(t("demo"))
+        self.demo_btn.setObjectName("SmallBtn")
+        self.demo_btn.clicked.connect(self.open_demo)
+        ds_layout.addWidget(self.demo_btn, alignment=Qt.AlignmentFlag.AlignLeft)
+        side.addWidget(ds_card)
+
+        # Card 2: Observation Window (ROI)
+        roi_card = QFrame()
+        roi_card.setObjectName("CardFrame")
+        roi_layout = QVBoxLayout(roi_card)
+        roi_layout.setContentsMargins(12, 10, 12, 10)
+        roi_hdr = QHBoxLayout()
+        roi_lbl = QLabel(t("roi"))
+        roi_lbl.setObjectName("SectionLabel")
+        roi_hdr.addWidget(roi_lbl)
+        roi_hdr.addWidget(help_button(roi_card, t("roi_help")))
+        roi_hdr.addStretch(1)
+        roi_layout.addLayout(roi_hdr)
+
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItems([t(m) for m in MODES])
+        self.mode_combo.setCurrentIndex(MODES.index(self.settings.roi_mode))
+        self.mode_combo.currentIndexChanged.connect(self.change_roi)
+        roi_layout.addWidget(self.mode_combo)
+
+        self.roi_note = QLabel("")
+        self.roi_note.setWordWrap(True)
+        self.roi_note.setObjectName("MutedLabel")
+        roi_layout.addWidget(self.roi_note)
+
+        # Edge correction & hull area bias guard (Recommendations A & C)
+        edge_row = QHBoxLayout()
+        edge_row.addWidget(QLabel(t("edge_correction")))
+        edge_row.addWidget(help_button(roi_card, t("edge_correction_help")))
+        edge_row.addStretch(1)
+        roi_layout.addLayout(edge_row)
+        self.edge_combo = QComboBox()
+        self.edge_combo.addItems([t(lbl) for lbl in EDGE_LABELS])
+        cur_ec = EDGE_CHOICES.index(self.settings.edge_correction) if self.settings.edge_correction in EDGE_CHOICES else 0
+        self.edge_combo.setCurrentIndex(cur_ec)
+        self.edge_combo.currentIndexChanged.connect(self._on_edge_changed)
+        roi_layout.addWidget(self.edge_combo)
+
+        self.convex_guard_row = QHBoxLayout()
+        self.convex_guard_cb = QCheckBox(t("convex_hull_guard"))
+        self.convex_guard_cb.setChecked(self.settings.hull_ratio >= 0.999)
+        self.convex_guard_cb.toggled.connect(self._on_convex_guard_toggled)
+        self.convex_guard_row.addWidget(self.convex_guard_cb)
+        self.convex_guard_row.addWidget(help_button(roi_card, t("convex_hull_guard_help")))
+        self.convex_guard_row.addStretch(1)
+        roi_layout.addLayout(self.convex_guard_row)
+
+        self.shared_hull_row = QHBoxLayout()
+        self.shared_hull_cb = QCheckBox(t("shared_sample_hull"))
+        self.shared_hull_cb.setChecked(not self.settings.infer_per_label)
+        self.shared_hull_cb.toggled.connect(self._on_shared_hull_toggled)
+        self.shared_hull_row.addWidget(self.shared_hull_cb)
+        self.shared_hull_row.addWidget(help_button(roi_card, t("shared_sample_hull_help")))
+        self.shared_hull_row.addStretch(1)
+        roi_layout.addLayout(self.shared_hull_row)
+
+        self.roi_btn_layout = QHBoxLayout()
+        roi_layout.addLayout(self.roi_btn_layout)
+        side.addWidget(roi_card)
+
+        # Card 3: Point-Type Mode (promoted to main sidebar for discoverability)
+        marks_card = QFrame()
+        marks_card.setObjectName("CardFrame")
+        marks_layout = QVBoxLayout(marks_card)
+        marks_layout.setContentsMargins(12, 10, 12, 10)
+        m_hdr = QHBoxLayout()
+        m_lbl = QLabel(t("marks"))
+        m_lbl.setObjectName("SectionLabel")
+        m_hdr.addWidget(m_lbl)
+        m_hdr.addWidget(help_button(marks_card, t("marks_help")))
+        m_hdr.addStretch(1)
+        marks_layout.addLayout(m_hdr)
+
+        self.marks_combo = QComboBox()
+        self.marks_combo.addItems([t(m) for m in MARKS_MODES])
+        cur_m = MARKS_MODES.index(self.settings.marks) if self.settings.marks in MARKS_MODES else 2
+        self.marks_combo.setCurrentIndex(cur_m)
+        self.marks_combo.currentIndexChanged.connect(self._on_marks_changed)
+        marks_layout.addWidget(self.marks_combo)
+
+        self.cross_box = QWidget()
+        cross_layout = QHBoxLayout(self.cross_box)
+        cross_layout.setContentsMargins(0, 2, 0, 0)
+        self.focal_combo = QComboBox()
+        self.neighbor_combo = QComboBox()
+        cross_layout.addWidget(self.focal_combo, stretch=1)
+        cross_layout.addWidget(QLabel("→"))
+        cross_layout.addWidget(self.neighbor_combo, stretch=1)
+        self.focal_combo.currentTextChanged.connect(self._on_cross_type_changed)
+        self.neighbor_combo.currentTextChanged.connect(self._on_cross_type_changed)
+        marks_layout.addWidget(self.cross_box)
+        side.addWidget(marks_card)
+
+        # Card 4: Fixed Radius Discretization
+        r_card = QFrame()
+        r_card.setObjectName("CardFrame")
+        r_layout = QVBoxLayout(r_card)
+        r_layout.setContentsMargins(12, 10, 12, 10)
+        r_hdr = QHBoxLayout()
+        r_lbl = QLabel(t("fixed_r_section"))
+        r_lbl.setObjectName("SectionLabel")
+        r_hdr.addWidget(r_lbl)
+        r_hdr.addWidget(help_button(r_card, t("fixed_r_help")))
+        r_hdr.addStretch(1)
+        r_layout.addLayout(r_hdr)
+
+        self.fixed_r_cb = QCheckBox(t("use_fixed_r"))
+        self.fixed_r_cb.setChecked(self.settings.r_step is not None)
+        self.fixed_r_cb.toggled.connect(self._sync_sidebar_r)
+        r_layout.addWidget(self.fixed_r_cb)
+
+        r_inputs = QHBoxLayout()
+        r_inputs.addWidget(QLabel(t("r_range_inline")))
+        self.rmax_edit = QLineEdit("" if self.settings.r_max is None else f"{self.settings.r_max:g}")
+        self.rmax_edit.setFixedWidth(66)
+        r_inputs.addWidget(self.rmax_edit)
+        r_inputs.addWidget(QLabel(t("r_step_inline")))
+        self.rstep_edit = QLineEdit("" if self.settings.r_step is None else f"{self.settings.r_step:g}")
+        self.rstep_edit.setFixedWidth(56)
+        r_inputs.addWidget(self.rstep_edit)
+        r_inputs.addStretch(1)
+        r_layout.addLayout(r_inputs)
+        self.rmax_edit.textChanged.connect(self._update_r_note)
+        self.rstep_edit.textChanged.connect(self._update_r_note)
+
+        self.r_note = QLabel("")
+        self.r_note.setWordWrap(True)
+        self.r_note.setObjectName("MutedLabel")
+        r_layout.addWidget(self.r_note)
+        side.addWidget(r_card)
+
+        # Action buttons
+        self.advanced_btn = QPushButton(t("advanced"))
+        self.advanced_btn.clicked.connect(self.open_advanced)
+        side.addWidget(self.advanced_btn)
+
+        self.run_btn = QPushButton(t("run"))
+        self.run_btn.setObjectName("PrimaryBtn")
+        self.run_btn.setMinimumHeight(34)
+        self.run_btn.clicked.connect(self.start)
+        side.addWidget(self.run_btn)
+
+        self.cancel_btn = QPushButton(t("cancel_job"))
+        self.cancel_btn.clicked.connect(self.cancel)
+        side.addWidget(self.cancel_btn)
+        side.addStretch(1)
+
+        # Main right panel
+        self.main_area = QWidget()
+        self.main_layout = QVBoxLayout(self.main_area)
+        self.main_layout.setContentsMargins(0, 4, 0, 0)
+        body.addWidget(self.main_area, stretch=1)
+
+        # Footer status + progress bar
+        footer = QHBoxLayout()
+        self.status_label = QLabel(t(self.status[0], **self.status[1]))
+        self.status_label.setObjectName("MutedLabel")
+        footer.addWidget(self.status_label)
+        footer.addStretch(1)
+        self.progress = QProgressBar()
+        self.progress.setFixedWidth(210)
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        footer.addWidget(self.progress)
+        outer.addLayout(footer)
+
+        self._populate_cross_combos()
         self.refresh_sidebar()
         self.render_main()
-        root.bind("<Control-o>", lambda _: self.open_data())
 
-    def set_status(self, key, **values):
+    def _populate_cross_combos(self):
+        types = sorted_types(self.data.points.cell_type) if self.data is not None else []
+        self.focal_combo.blockSignals(True)
+        self.neighbor_combo.blockSignals(True)
+        self.focal_combo.clear()
+        self.neighbor_combo.clear()
+        self.focal_combo.addItems(types)
+        self.neighbor_combo.addItems(types)
+        if self.settings.from_type in types:
+            self.focal_combo.setCurrentText(self.settings.from_type)
+        elif types:
+            self.focal_combo.setCurrentIndex(0)
+        if self.settings.to_type in types:
+            self.neighbor_combo.setCurrentText(self.settings.to_type)
+        elif len(types) > 1:
+            self.neighbor_combo.setCurrentIndex(1)
+        self.focal_combo.blockSignals(False)
+        self.neighbor_combo.blockSignals(False)
+        self.cross_box.setVisible(self.settings.marks == "cross")
+
+    def _on_edge_changed(self, idx: int):
+        if 0 <= idx < len(EDGE_CHOICES):
+            self.settings = replace(self.settings, edge_correction=EDGE_CHOICES[idx])
+
+    def _on_convex_guard_toggled(self, checked: bool):
+        new_ratio = 1.0 if checked else (0.35 if self.settings.hull_ratio >= 0.999 else self.settings.hull_ratio)
+        self.settings = replace(self.settings, hull_ratio=new_ratio)
+
+    def _on_shared_hull_toggled(self, checked: bool):
+        self.settings = replace(self.settings, infer_per_label=not checked)
+
+    def _on_marks_changed(self):
+        new_mark = MARKS_MODES[self.marks_combo.currentIndex()]
+        self.settings = replace(
+            self.settings,
+            marks=new_mark,
+            from_type=self.focal_combo.currentText(),
+            to_type=self.neighbor_combo.currentText(),
+        )
+        self.cross_box.setVisible(new_mark == "cross")
+
+    def _on_cross_type_changed(self):
+        if self.settings.marks == "cross":
+            self.settings = replace(
+                self.settings,
+                from_type=self.focal_combo.currentText(),
+                to_type=self.neighbor_combo.currentText(),
+            )
+
+    def _sync_sidebar_r(self):
+        if self.fixed_r_cb.isChecked():
+            _, rmax_def, rstep_def = default_fixed_grid(self.data)
+            if not self.rmax_edit.text().strip():
+                self.rmax_edit.setText(f"{rmax_def:g}")
+            if not self.rstep_edit.text().strip():
+                self.rstep_edit.setText(f"{rstep_def:g}")
+        self._update_r_note()
+        self.refresh_sidebar()
+
+    def _collect_sidebar_inputs(self, strict: bool = True):
+        if not self.fixed_r_cb.isChecked():
+            self.settings = replace(self.settings, r_step=None)
+        else:
+            if strict:
+                rmax = parse_number(self.rmax_edit, float, self.t, "r_max")
+                rstep = parse_number(self.rstep_edit, float, self.t, "r_step")
+            else:
+                rmax = float(self.rmax_edit.text().strip()) if self.rmax_edit.text().strip() else self.settings.r_max
+                rstep = float(self.rstep_edit.text().strip()) if self.rstep_edit.text().strip() else self.settings.r_step
+            rmin = self.settings.r_min if (self.settings.r_min is not None and self.settings.r_min > 0) else 0.0
+            self.settings = replace(self.settings, r_min=rmin, r_max=rmax, r_step=rstep)
+        if self.settings.marks == "cross":
+            self.settings = replace(
+                self.settings,
+                from_type=self.focal_combo.currentText(),
+                to_type=self.neighbor_combo.currentText(),
+            )
+
+    def _update_r_note(self):
+        t = self.t
+        if self.fixed_r_cb.isChecked():
+            try:
+                rmax = float(self.rmax_edit.text().strip())
+                rstep = float(self.rstep_edit.text().strip())
+                r0 = self.settings.r_min if (self.settings.r_min and self.settings.r_min > 0) else rstep
+                if rstep > 0 and rmax > r0:
+                    cnt = int(np.floor((rmax - r0) / rstep + 1e-9)) + 1
+                    r_last = r0 + (cnt - 1) * rstep
+                    self.r_note.setText(t("r_grid_summary", count=cnt, r0=r0, r1=r_last, step=rstep))
+                    return
+            except ValueError:
+                pass
+        self.r_note.setText(t("r_auto_summary", n=self.settings.n_radii))
+
+    def set_status(self, key: str, **values):
         self.status = (key, values)
-        self.status_label.configure(text=self.t(key, **values))
+        self.status_label.setText(self.t(key, **values))
 
-    def switch_language(self, selected):
-        self.t = Translator("zh-TW" if selected else "en")
-        self.draw_shell()
+    def switch_language(self, selected_index: int):
+        new_lang = "zh-TW" if selected_index else "en"
+        if new_lang != self.t.lang:
+            self.t = Translator(new_lang)
+            self.draw_shell()
+
+    def _clear_layout(self, layout):
+        while layout.count():
+            item = layout.takeAt(0)
+            w = item.widget()
+            sub = item.layout()
+            if w is not None:
+                w.deleteLater()
+            elif sub is not None:
+                self._clear_layout(sub)
 
     def refresh_sidebar(self):
         t = self.t
@@ -167,87 +740,137 @@ class SpatialAnalysisGUI:
             text = t("no_data")
         else:
             data = self.data
-            text = self.dataset_name + "\n" + t("data_count", n=len(data.points), N=data.points.sample_id.nunique(),
-                                               fields=len({(s, r) for _, s, r in data.fields}))
+            text = self.dataset_name + "\n" + t(
+                "data_count",
+                n=len(data.points),
+                N=data.points.sample_id.nunique(),
+                fields=len({(s, r) for _, s, r in data.fields}),
+            )
+            n_grp = len(set(data.points.group) - {""})
+            n_typ = len(set(data.points.cell_type) - {""})
+            if n_grp or n_typ:
+                text += "\n" + t("data_meta_summary", groups=max(1, n_grp), types=max(1, n_typ))
             if len(data.issues):
                 text += "\n" + t("qc_count", count=len(data.issues))
-        self.dataset_label.configure(text=text)
+        self.dataset_label.setText(text)
+
         mode = self.settings.roi_mode
         note = t(mode + "_note")
         if mode == "rectangle" and self.settings.rectangle is not None:
             note += "\n" + " · ".join(f"{x:g}" for x in self.settings.rectangle)
         if mode == "custom" and self.settings.custom:
-            note += "\n" + (Path(self.roi_path).name if self.roi_path else str(len(self.settings.custom)))
-        self.roi_note.configure(text=note)
-        for child in self.roi_buttons.winfo_children():
-            child.destroy()
-        actions = {"rectangle": (("configure_roi", self.rectangle_dialog),),
-                   "custom": (("load_roi", self.import_roi), ("draw_roi", self.draw_roi))}
-        for label, command in actions.get(mode, ()):
-            ttk.Button(self.roi_buttons, text=t(label), command=command,
-                       state="normal" if self.data is not None and not self.job else "disabled").pack(anchor="w", pady=2)
-        busy = self.job is not None
-        for widget in (self.open_btn, self.demo_btn):
-            widget.configure(state="disabled" if busy else "normal")
-        state = "normal" if self.data is not None and not busy else "disabled"
-        self.mode.configure(state="readonly" if state == "normal" else "disabled")
-        self.advanced_btn.configure(state=state)
-        self.run_btn.configure(state=state)
-        self.cancel_btn.configure(state="normal" if busy and self.job[1] == "analysis" else "disabled")
-        if self.results is not None and hasattr(self, "clear_btn") and self.clear_btn.winfo_exists():
-            self.clear_btn.configure(state="disabled" if busy else "normal")
+            note += "\n" + (Path(self.roi_path).name if self.roi_path else f"{len(self.settings.custom)} ROI(s)")
+        self.roi_note.setText(note)
 
-    def change_roi(self, _):
-        self.settings = replace(self.settings, roi_mode=MODES[self.mode.current()])
+        self._clear_layout(self.roi_btn_layout)
+        actions = {
+            "rectangle": (("configure_roi", self.open_rectangle_dialog),),
+            "custom": (("load_roi", self.import_roi), ("draw_roi", self.draw_roi)),
+        }
+        busy = self.job is not None
+        ready = self.data is not None and not busy
+        for label, cmd in actions.get(mode, ()):
+            b = QPushButton(t(label))
+            b.setObjectName("SmallBtn")
+            b.setEnabled(ready)
+            b.clicked.connect(cmd)
+            self.roi_btn_layout.addWidget(b)
+        if actions.get(mode):
+            self.roi_btn_layout.addStretch(1)
+
+        self.open_btn.setEnabled(not busy)
+        self.reimport_btn.setEnabled(not busy and self.last_import_paths is not None)
+        self.demo_btn.setEnabled(not busy)
+        self.mode_combo.setEnabled(ready)
+        self.edge_combo.setEnabled(ready)
+        is_infer = mode == "infer"
+        self.convex_guard_cb.setVisible(is_infer)
+        self.convex_guard_cb.setEnabled(ready and is_infer)
+        is_inferred_any = mode in ("infer", "locked")
+        self.shared_hull_cb.setVisible(is_inferred_any)
+        self.shared_hull_cb.setEnabled(ready and is_inferred_any)
+        self.marks_combo.setEnabled(ready)
+        self.focal_combo.setEnabled(ready)
+        self.neighbor_combo.setEnabled(ready)
+        self.fixed_r_cb.setEnabled(ready)
+        self.rmax_edit.setEnabled(ready and self.fixed_r_cb.isChecked())
+        self.rstep_edit.setEnabled(ready and self.fixed_r_cb.isChecked())
+        self._update_r_note()
+        self.advanced_btn.setEnabled(ready)
+        self.run_btn.setEnabled(ready)
+        self.cancel_btn.setEnabled(bool(busy and self.job[1] == "analysis"))
+        if hasattr(self, "clear_btn") and self.clear_btn is not None:
+            try:
+                self.clear_btn.setEnabled(not busy)
+            except RuntimeError:
+                pass
+
+    def change_roi(self, index: int):
+        self.settings = replace(self.settings, roi_mode=MODES[index])
         self.refresh_sidebar()
 
     def open_data(self):
         if self.job is not None:
             return
-        files = filedialog.askopenfilenames(parent=self.root, title=self.t("open"), filetypes=[
-            ("CSV / TSV / Excel", ("*.csv", "*.tsv", "*.txt", "*.xlsx", "*.xls")), ("*", "*")])
+        files, _ = QFileDialog.getOpenFileNames(
+            self,
+            self.t("open"),
+            "",
+            "CSV / TSV / Excel (*.csv *.tsv *.txt *.xlsx *.xls);;All files (*)",
+        )
         if files:
-            ImportDialog(self.root, self.t, files, self.import_points)
+            dlg = ImportDialog(self, self.t, files, self.import_points)
+            dlg.exec()
+
+    def reconfigure_import(self):
+        if self.job is not None or self.last_import_paths is None:
+            return
+        dlg = ImportDialog(
+            self, self.t, self.last_import_paths, self.import_points, initial_state=self.last_import_state
+        )
+        dlg.exec()
 
     def import_points(self, paths, options, mapping, calibration, duplicates):
-        name = Path(paths[0]).name if len(paths) == 1 else f"{Path(paths[0]).name} +{len(paths) - 1}"
-        self.launch("import", lambda _job, _stop: (load_dataset(paths, options, mapping, calibration, duplicates), name))
+        self.last_import_paths = tuple(paths)
+        self.last_import_state = (options, dict(mapping), calibration, duplicates)
+        base_name = Path(paths[0]).name if len(paths) == 1 else f"{Path(paths[0]).name} +{len(paths) - 1}"
+        if options.sheets and len(options.sheets) > 1:
+            base_name += f" ({len(options.sheets)} sheets)"
+        self.launch(
+            "import",
+            lambda _job, _stop, _prog: (load_dataset(paths, options, mapping, calibration, duplicates), base_name),
+        )
 
     def open_demo(self):
         if self.job is None:
-            self.launch("import", lambda _job, _stop: (demo_data(), "Demo · points.csv"))
+            self.last_import_paths = None
+            self.last_import_state = None
+            self.launch("import", lambda _job, _stop, _prog: (demo_data(), "Demo · points.csv"))
 
-    def rectangle_dialog(self):
-        dialog = modal(self.root, self.t("configure_roi"))
-        base = frame(dialog)
-        factors = self.data.calibration.factors
-        old = self.settings.rectangle
-        values = old if old is not None else ("", "", "", "")
-        if old is not None:
-            values = [v / factors[i % 2] for i, v in enumerate(old)]
-        controls = [entry(base, self.t, label, value, "bounds_help") for label, value in zip(RECT_COLUMNS, values)]
+    def open_rectangle_dialog(self):
+        if self.data is None:
+            return
 
-        def accept():
-            try:
-                bounds = tuple(number(control, float, self.t, key) * factors[i % 2]
-                               for i, (key, control) in enumerate(zip(RECT_COLUMNS, controls)))
-                make_window("rectangle", [], bounds)
-                self.settings = replace(self.settings, rectangle=bounds)
-                self.refresh_sidebar()
-                dialog.destroy()
-            except ValueError as error:
-                show_error(dialog, self.t, error)
+        def save_bounds(bounds):
+            self.settings = replace(self.settings, rectangle=bounds)
+            self.refresh_sidebar()
 
-        buttons(base, self.t, accept)
+        rectangle_dialog(self, self.t, self.data.calibration, self.settings.rectangle, save_bounds)
 
     def import_roi(self):
+        if self.data is None:
+            return
         t = self.t
-        path = filedialog.askopenfilename(parent=self.root, title=t("load_roi"), filetypes=[
-            ("ROI · GeoJSON / WKT / PNG / TIFF", ("*.geojson", "*.json", "*.wkt", "*.png", "*.tif", "*.tiff"))])
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            t("load_roi"),
+            "",
+            "ROI · GeoJSON / WKT / PNG / TIFF (*.geojson *.json *.wkt *.png *.tif *.tiff)",
+        )
         if not path:
             return
 
-        def load(origin, parent):
+        def load_with_origin(origin, parent_widget):
             try:
                 geometry = load_custom_roi(path, self.data.calibration, origin)
                 for window in geometry.values():
@@ -257,237 +880,715 @@ class SpatialAnalysisGUI:
                 self.refresh_sidebar()
                 return True
             except Exception as error:
-                show_error(parent, t, error)
+                show_error(parent_widget, t, error)
                 return False
 
         if Path(path).suffix.lower() not in (".png", ".tif", ".tiff"):
-            load((0, 0), self.root)
-            return
-        dialog = modal(self.root, t("mask_origin"))
-        base = frame(dialog)
-        x = entry(base, t, "x", "0", "origin_help")
-        y = entry(base, t, "y", "0", "origin_help")
-
-        def accept():
-            try:
-                if load((number(x, float, t, "x"), number(y, float, t, "y")), dialog):
-                    dialog.destroy()
-            except ValueError as error:
-                show_error(dialog, t, error)
-
-        buttons(base, t, accept)
+            load_with_origin((0.0, 0.0), self)
+        else:
+            mask_origin_dialog(self, t, load_with_origin)
 
     def draw_roi(self):
-        def save(key, geometry):
+        if self.data is None:
+            return
+
+        def save_geom(key, geometry):
             self.settings = replace(self.settings, custom={**self.settings.custom, key: geometry})
             self.refresh_sidebar()
-        geometry_dialog(self.root, self.t, self.data, save)
+
+        geometry_dialog(self, self.t, self.data, self.settings.custom, save_geom)
 
     def open_advanced(self):
-        def save(settings, path):
-            self.settings, self.intensity_path = settings, path
-        advanced_dialog(self.root, self.t, self.data, self.settings, self.intensity_path, save)
+        self._preserve_sidebar_draft()
 
-    def launch(self, kind, work):
+        def save(new_settings, path):
+            self.settings, self.intensity_path = new_settings, path
+            self.edge_combo.blockSignals(True)
+            if new_settings.edge_correction in EDGE_CHOICES:
+                self.edge_combo.setCurrentIndex(EDGE_CHOICES.index(new_settings.edge_correction))
+            self.edge_combo.blockSignals(False)
+            self.convex_guard_cb.blockSignals(True)
+            self.convex_guard_cb.setChecked(new_settings.hull_ratio >= 0.999)
+            self.convex_guard_cb.blockSignals(False)
+            self.shared_hull_cb.blockSignals(True)
+            self.shared_hull_cb.setChecked(not new_settings.infer_per_label)
+            self.shared_hull_cb.blockSignals(False)
+            self.marks_combo.blockSignals(True)
+            if new_settings.marks in MARKS_MODES:
+                self.marks_combo.setCurrentIndex(MARKS_MODES.index(new_settings.marks))
+            self.marks_combo.blockSignals(False)
+            self._populate_cross_combos()
+            self.fixed_r_cb.blockSignals(True)
+            self.fixed_r_cb.setChecked(new_settings.r_step is not None)
+            self.fixed_r_cb.blockSignals(False)
+            self.rmax_edit.setText("" if new_settings.r_max is None else f"{new_settings.r_max:g}")
+            self.rstep_edit.setText("" if new_settings.r_step is None else f"{new_settings.r_step:g}")
+            self.refresh_sidebar()
+
+        advanced_dialog(self, self.t, self.data, self.settings, self.intensity_path, save)
+
+    def launch(self, kind: str, work_fn):
         if self.job is not None:
             return
         self.next_job += 1
-        job = self.next_job
-        self.job = (job, kind)
+        job_id = self.next_job
+        self.job = (job_id, kind)
         self.stop = Event()
-        stop = self.stop
         self.set_status("loading" if kind == "import" else "preparing")
-        self.progress.configure(value=0, maximum=100)
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
         self.refresh_sidebar()
 
-        def worker():
-            try:
-                result = work(job, stop)
-                self.queue.put((job, "success", result))
-            except Cancelled:
-                self.queue.put((job, "canceled", None))
-            except Exception as error:
-                self.queue.put((job, "error", error))
+        self.worker = WorkerThread(job_id, work_fn, self.stop, self)
+        self.worker.progress_changed.connect(self._on_worker_progress)
+        self.worker.task_finished.connect(self._on_worker_finished)
+        self.worker.start()
 
-        Thread(target=worker, daemon=True).start()
+    def _on_worker_progress(self, job_id: int, done: int, total: int):
+        if self.job is None or self.job[0] != job_id:
+            return
+        if self.stop is not None and not self.stop.is_set():
+            if done < total:
+                self.set_status("progress", done=done, total=total)
+            else:
+                self.set_status("finalizing")
+        self.progress.setRange(0, max(1, total))
+        self.progress.setValue(done)
+
+    def _on_worker_finished(self, job_id: int, state: str, payload):
+        if self.job is None or self.job[0] != job_id:
+            return
+        kind = self.job[1]
+        canceled = (self.stop is not None and self.stop.is_set()) or state == "canceled"
+        self.job, self.stop, self.worker = None, None, None
+        try:
+            if canceled:
+                self.set_status("canceled")
+            elif state == "error":
+                self.set_status("failed")
+                show_error(self, self.t, payload)
+            elif kind == "import":
+                self.data, self.dataset_name = payload
+                self.results = None
+                self._configure_defaults_for_dataset()
+                self.roi_path, self.intensity_path = "", ""
+                self.selected.clear()
+                self.roi_filter_group = None
+                self.roi_filter_type = None
+                self.active_series.clear()
+                self.set_status("ready")
+                self.render_main()
+            else:
+                self.results = payload
+                self.view = "view_groups"
+                self.selected.clear()
+                presets = self._build_presets()
+                self.preset_index = 0
+                if presets:
+                    self._update_active_comparison(presets[0][1])
+                else:
+                    self.active_series = list(self.results.summaries)
+                self.set_status("done")
+                self.render_main()
+        except Exception as error:
+            self.set_status("failed")
+            show_error(self, self.t, error)
+        finally:
+            self.refresh_sidebar()
 
     def start(self):
         if self.data is None or self.job is not None:
             return
+        try:
+            self._collect_sidebar_inputs(strict=True)
+            self.settings.validate()
+        except ValueError as error:
+            show_error(self, self.t, error)
+            return
         data, settings = self.data, self.settings
         roi_path, intensity_path = self.roi_path, self.intensity_path
 
-        def analyze(job, stop):
-            results = run_analysis(data, settings, lambda done, total: self.queue.put((job, "progress", (done, total))), stop)
+        def analyze(_job, stop_ev, progress_cb):
+            results = run_analysis(data, settings, progress_cb, stop_ev)
             results.source_roi, results.source_intensity = roi_path, intensity_path
             return results
 
         self.launch("analysis", analyze)
 
-    def poll(self):
+    def _configure_defaults_for_dataset(self):
+        n_samples = self.data.points.sample_id.nunique()
+        types = sorted_types(self.data.points.cell_type)
+        roi_mode = "rectangle" if self.data.bounds else "infer"
+        marks = "each_and_merged" if len(types) >= 2 else "all"
+        if n_samples > 1:
+            r0, rmax, rstep = default_fixed_grid(self.data)
+            self.settings = Settings(
+                roi_mode=roi_mode,
+                edge_correction="translation",
+                r_min=r0,
+                r_max=rmax,
+                r_step=rstep,
+                marks=marks,
+                from_type=types[0] if types else "",
+                to_type=types[1] if len(types) > 1 else "",
+            )
+        else:
+            self.settings = Settings(
+                roi_mode=roi_mode,
+                marks=marks,
+                from_type=types[0] if types else "",
+                to_type=types[1] if len(types) > 1 else "",
+            )
+        self.mode_combo.blockSignals(True)
+        self.mode_combo.setCurrentIndex(MODES.index(self.settings.roi_mode))
+        self.mode_combo.blockSignals(False)
+        self.edge_combo.blockSignals(True)
+        self.edge_combo.setCurrentIndex(EDGE_CHOICES.index(self.settings.edge_correction))
+        self.edge_combo.blockSignals(False)
+        self.convex_guard_cb.blockSignals(True)
+        self.convex_guard_cb.setChecked(self.settings.hull_ratio >= 0.999)
+        self.convex_guard_cb.blockSignals(False)
+        self.shared_hull_cb.blockSignals(True)
+        self.shared_hull_cb.setChecked(not self.settings.infer_per_label)
+        self.shared_hull_cb.blockSignals(False)
+        self.marks_combo.blockSignals(True)
+        self.marks_combo.setCurrentIndex(MARKS_MODES.index(self.settings.marks))
+        self.marks_combo.blockSignals(False)
+        self._populate_cross_combos()
+        self.fixed_r_cb.blockSignals(True)
+        self.fixed_r_cb.setChecked(self.settings.r_step is not None)
+        self.fixed_r_cb.blockSignals(False)
+        self.rmax_edit.setText("" if self.settings.r_max is None else f"{self.settings.r_max:g}")
+        self.rstep_edit.setText("" if self.settings.r_step is None else f"{self.settings.r_step:g}")
+
+    def _build_presets(self):
+        t = self.t
+        res = self.results
+        if res is None or not res.summaries:
+            return []
+        presets = build_natural_presets(res, t)
+        if len(res.summaries) > 1 and len(presets) > 1:
+            presets.append((t("preset_all_series", n=len(res.summaries)), list(res.summaries)))
+        return presets
+
+    def _update_active_comparison(self, series_list):
+        self.active_series = list(series_list)
+        res = self.results
+        if res is None:
+            return
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
-            while True:
-                job, message, payload = self.queue.get_nowait()
-                if self.job is None or self.job[0] != job:
-                    continue
-                kind = self.job[1]
-                if message == "progress":
-                    done, total = payload
-                    if not self.stop.is_set():
-                        self.set_status("progress", done=done, total=total) if done < total else self.set_status("finalizing")
-                    self.progress.configure(value=done, maximum=max(1, total))
-                    continue
-                canceled = self.stop.is_set() or message == "canceled"
-                self.job, self.stop = None, None
-                try:
-                    if canceled:
-                        self.set_status("canceled")
-                    elif message == "error":
-                        self.set_status("failed")
-                        show_error(self.root, self.t, payload)
-                    elif kind == "import":
-                        self.data, self.dataset_name = payload
-                        self.results = None
-                        self.settings = Settings(roi_mode="rectangle" if self.data.bounds else "infer")
-                        self.mode.current(MODES.index(self.settings.roi_mode))
-                        self.roi_path, self.intensity_path = "", ""
-                        self.selected.clear()
-                        self.set_status("ready")
-                        self.render_main()
-                    else:
-                        self.results = payload
-                        self.view = "view_groups"
-                        self.selected.clear()
-                        self.set_status("done")
-                        self.render_main()
-                except Exception as error:
-                    self.set_status("failed")
-                    show_error(self.root, self.t, error)
-                finally:
-                    self.refresh_sidebar()
-        except Empty:
-            pass
+            if len(self.active_series) >= 2:
+                res.comparison = compare_series(
+                    self.active_series,
+                    res.radii,
+                    data=res.data,
+                    simulations=min(res.settings.simulations, 999),
+                    seed=res.settings.seed,
+                    pairing_mode=res.settings.pairing_mode,
+                    perm_stat=res.settings.perm_stat,
+                    all_text=self.t("all"),
+                )
+            else:
+                res.comparison = None
+            self.selected.pop("view_contrast", None)
         finally:
-            self.root.after(70, self.poll)
+            QApplication.restoreOverrideCursor()
 
     def cancel(self):
         if self.stop is not None:
             self.stop.set()
             self.set_status("canceled")
 
-    def close(self):
+    def closeEvent(self, event):
         if self.stop is not None:
             self.stop.set()
-        self.root.destroy()
+        if self.worker is not None and self.worker.isRunning():
+            self.worker.wait(1500)
+        super().closeEvent(event)
 
     def render_main(self):
         t = self.t
         self.figure = None
-        for child in self.main.winfo_children():
-            child.destroy()
+        self._clear_layout(self.main_layout)
         if self.results is None:
-            self.welcome()
+            self._render_welcome()
             return
-        bar = ttk.Frame(self.main)
-        bar.pack(fill="x", pady=(0, 6))
-        ttk.Label(bar, text=t("results"), style="Section.TLabel").pack(side="left")
-        self.pdf_btn = ttk.Button(bar, text=t("pdf"), command=self.export_pdf)
-        self.pdf_btn.pack(side="right")
-        ttk.Button(bar, text=t("data_export"), command=self.export_tables).pack(side="right", padx=6)
-        self.clear_btn = ttk.Button(bar, text=t("clear_results"), command=self.clear_results,
-                                    state="disabled" if self.job else "normal")
-        self.clear_btn.pack(side="right")
-        tabs = ttk.Notebook(self.main)
-        tabs.pack(fill="both", expand=True)
-        self.pages = {}
+
+        bar = QHBoxLayout()
+        res_lbl = QLabel(t("results"))
+        res_lbl.setObjectName("SectionLabel")
+        bar.addWidget(res_lbl)
+        bar.addStretch(1)
+
+        self.clear_btn = QPushButton(t("clear_results"))
+        self.clear_btn.setEnabled(self.job is None)
+        self.clear_btn.clicked.connect(self.clear_results)
+        bar.addWidget(self.clear_btn)
+
+        export_data_btn = QPushButton(t("data_export"))
+        export_data_btn.clicked.connect(self.export_tables)
+        bar.addWidget(export_data_btn)
+
+        batch_btn = QPushButton(t("batch_export"))
+        batch_btn.clicked.connect(self.export_batch)
+        bar.addWidget(batch_btn)
+
+        self.pdf_btn = QPushButton(t("export_figure"))
+        self.pdf_btn.setObjectName("PrimaryBtn")
+        self.pdf_btn.clicked.connect(self.export_pdf)
+        bar.addWidget(self.pdf_btn)
+        self.main_layout.addLayout(bar)
+
+        self.tabs = QTabWidget()
+        self.pages: dict[str, QWidget] = {}
         for key in VIEWS:
-            page = ttk.Frame(tabs, padding=(9, 8))
+            page = QWidget()
+            page_layout = QVBoxLayout(page)
+            page_layout.setContentsMargins(12, 10, 12, 10)
+            page_layout.setSpacing(6)
             self.pages[key] = page
-            tabs.add(page, text=t(key))
-        tabs.select(self.pages[self.view])
-
-        def change(_):
-            selected = tabs.select()
-            key = next((k for k, page in self.pages.items() if str(page) == selected), None)
-            if key is not None and (key != self.view or not self.pages[key].winfo_children()):
-                self.view = key
-                self.render_view()
-
-        tabs.bind("<<NotebookTabChanged>>", change)
+            self.tabs.addTab(page, t(key))
+        self.tabs.setCurrentIndex(VIEWS.index(self.view))
+        self.tabs.currentChanged.connect(self._on_tab_changed)
+        self.main_layout.addWidget(self.tabs, stretch=1)
         self.render_view()
 
-    def welcome(self):
-        t = self.t
-        hero = ttk.Frame(self.main, style="Card.TFrame", padding=(32, 37))
-        hero.pack(fill="both", expand=True)
-        ttk.Label(hero, text=t("welcome_title"), style="Hero.TLabel", wraplength=530).pack(anchor="w")
-        ttk.Label(hero, text=t("welcome_body"), style="HeroBody.TLabel", wraplength=520, justify="left").pack(anchor="w", pady=(12, 18))
-        if self.data is not None and len(self.data.issues):
-            ttk.Label(hero, text=t("qc_before_run"), style="Hero.TLabel").pack(anchor="w", pady=(8, 3))
-            self.qc_table(hero, self.data.issues)
-
-    def selected_item(self, page, labels):
-        key = self.view
-        index = min(self.selected.get(key, 0), len(labels) - 1)
-        if len(labels) < 2:
-            return index
-        combo = ttk.Combobox(page, values=labels, state="readonly", width=45)
-        combo.current(index)
-        combo.pack(anchor="w", pady=(0, 6))
-
-        def select(_):
-            self.selected[key] = combo.current()
+    def _on_tab_changed(self, index: int):
+        if 0 <= index < len(VIEWS):
+            self.view = VIEWS[index]
             self.render_view()
-        combo.bind("<<ComboboxSelected>>", select)
-        return index
+
+    def _render_welcome(self):
+        t = self.t
+        hero = QFrame()
+        hero.setObjectName("CardFrame")
+        layout = QVBoxLayout(hero)
+        layout.setContentsMargins(36, 36, 36, 36)
+        layout.setSpacing(12)
+        title = QLabel(t("welcome_title"))
+        title.setObjectName("HeroTitle")
+        title.setWordWrap(True)
+        body = QLabel(t("welcome_body"))
+        body.setObjectName("HeroBody")
+        body.setWordWrap(True)
+        layout.addWidget(title)
+        layout.addWidget(body)
+        if self.data is not None and len(self.data.issues):
+            qc_hdr = QLabel(t("qc_before_run"))
+            qc_hdr.setObjectName("SectionLabel")
+            layout.addWidget(qc_hdr)
+            self._build_qc_table(layout, self.data.issues)
+        else:
+            layout.addStretch(1)
+        self.main_layout.addWidget(hero, stretch=1)
+
+    def _grouping_toolbar(self, page_layout: QVBoxLayout, include_band: bool = True, include_design: bool = False):
+        t = self.t
+        res = self.results
+        toolbar = QHBoxLayout()
+        toolbar.setSpacing(6)
+
+        presets = self._build_presets()
+        preset_names = [p[0] for p in presets]
+        if self.preset_index is None:
+            preset_names.append(t("preset_custom", n=len(self.active_series)))
+            cur_idx = len(preset_names) - 1
+        else:
+            cur_idx = min(self.preset_index, max(0, len(preset_names) - 1))
+
+        if preset_names:
+            toolbar.addWidget(QLabel(t("grouping_label")))
+            p_combo = QComboBox()
+            p_combo.addItems(preset_names)
+            p_combo.setCurrentIndex(cur_idx)
+            p_combo.setMinimumWidth(240)
+
+            def on_preset(idx: int):
+                if 0 <= idx < len(presets):
+                    self.preset_index = idx
+                    self._update_active_comparison(presets[idx][1])
+                    self.render_view()
+
+            p_combo.currentIndexChanged.connect(on_preset)
+            toolbar.addWidget(p_combo)
+
+        def open_selector():
+            uids = [(s.series_id, s.group, s.label) for s in self.active_series]
+
+            def apply_custom(picked):
+                self.preset_index = None
+                self._update_active_comparison(picked)
+                self.render_view()
+
+            series_selector_dialog(self, t, res, uids, apply_custom)
+
+        choose_btn = QPushButton(t("choose_groups"))
+        choose_btn.setObjectName("SmallBtn")
+        choose_btn.clicked.connect(open_selector)
+        toolbar.addWidget(choose_btn)
+
+        if include_band:
+            b_combo = QComboBox()
+            b_combo.addItems([t(f"band_short_{b}") for b in BANDS])
+            cur_b = BANDS.index(res.settings.band) if res.settings.band in BANDS else 0
+            b_combo.setCurrentIndex(cur_b)
+
+            def on_band(idx: int):
+                new_band = BANDS[idx]
+                res.settings = replace(res.settings, band=new_band)
+                self.settings = replace(self.settings, band=new_band)
+                res.summaries = [with_band(s, new_band, res.settings.seed) for s in res.summaries]
+                res.custom_summaries = [with_band(s, new_band, res.settings.seed) for s in res.custom_summaries]
+                self.active_series = [with_band(s, new_band, res.settings.seed) for s in self.active_series]
+                self.render_view()
+
+            b_combo.currentIndexChanged.connect(on_band)
+            toolbar.addWidget(b_combo)
+
+            samples_cb = QCheckBox(t("show_samples"))
+            samples_cb.setChecked(self.show_samples)
+
+            def on_samples(checked: bool):
+                self.show_samples = checked
+                self.render_view()
+
+            samples_cb.toggled.connect(on_samples)
+            toolbar.addWidget(samples_cb)
+
+        if include_design:
+            d_keys = ["design_auto", "design_independent", "design_paired"]
+            d_combo = QComboBox()
+            d_combo.addItems([t(k) for k in d_keys])
+            cur_d = PAIRING_MODES.index(res.settings.pairing_mode) if res.settings.pairing_mode in PAIRING_MODES else 0
+            d_combo.setCurrentIndex(cur_d)
+
+            def on_design(idx: int):
+                new_pm = PAIRING_MODES[idx]
+                res.settings = replace(res.settings, pairing_mode=new_pm)
+                self.settings = replace(self.settings, pairing_mode=new_pm)
+                self._update_active_comparison(self.active_series)
+                self.render_view()
+
+            d_combo.currentIndexChanged.connect(on_design)
+            toolbar.addWidget(d_combo)
+
+            ps_combo = QComboBox()
+            ps_combo.addItems([t("perm_welch"), t("perm_diff")])
+            cur_ps = PERM_STATS.index(res.settings.perm_stat) if res.settings.perm_stat in PERM_STATS else 0
+            ps_combo.setCurrentIndex(cur_ps)
+
+            def on_pstat(idx: int):
+                new_ps = PERM_STATS[idx]
+                res.settings = replace(res.settings, perm_stat=new_ps)
+                self.settings = replace(self.settings, perm_stat=new_ps)
+                self._update_active_comparison(self.active_series)
+                self.render_view()
+
+            ps_combo.currentIndexChanged.connect(on_pstat)
+            toolbar.addWidget(ps_combo)
+
+        toolbar.addStretch(1)
+        page_layout.addLayout(toolbar)
+
+    def _format_omnibus_banner(self, om):
+        t = self.t
+        if om is None:
+            return None
+        sig = t("sig_Yes") if (np.isfinite(om.p_global) and om.p_global <= 0.05) else t("sig_No")
+        return t(
+            "omnibus_stat_line",
+            design=t("design_tag_" + om.design),
+            k=om.k_groups,
+            p=om.p_global,
+            sig=sig,
+            ptest=t(om.parametric_test) if om.parametric_test else "—",
+            pp=om.parametric_p,
+            nptest=t(om.nonparametric_test) if om.nonparametric_test else "—",
+            npp=om.nonparametric_p,
+        )
 
     def render_view(self):
         t = self.t
         page = self.pages[self.view]
-        for child in page.winfo_children():
-            child.destroy()
+        page_layout = page.layout()
+        self._clear_layout(page_layout)
         self.figure = None
         result = self.results
+
         if self.view == "view_groups":
-            labels = list(dict.fromkeys(s.label for s in result.summaries))
-            if labels:
-                i = self.selected_item(page, [label or t("all") for label in labels])
-                notes = [t("group_caption"), t("group_caption_n")]
-                if result.settings.band != "off" and any(s.n.min() < (3 if result.settings.band == "ci" else 2)
-                                                         for s in result.summaries if s.label == labels[i]):
+            if result.summaries:
+                if not self.active_series:
+                    presets = self._build_presets()
+                    self._update_active_comparison(presets[0][1] if presets else result.summaries)
+                self._grouping_toolbar(page_layout, include_band=True, include_design=False)
+                om = result.comparison.omnibus if result.comparison else None
+                banner = self._format_omnibus_banner(om)
+                if banner:
+                    b_lbl = QLabel(banner)
+                    b_lbl.setWordWrap(True)
+                    b_lbl.setObjectName("BannerLabel")
+                    page_layout.addWidget(b_lbl)
+                notes = [t("group_caption") + "  ·  " + t("group_caption_n")]
+                req_n = 3 if result.settings.band == "ci" else 2
+                if result.settings.band != "off" and any(
+                    s.n.min() < req_n for s in self.active_series if len(s.n)
+                ):
                     notes.append(t("band_na"))
-                if result.settings.band == "ci":
-                    notes.append(t("no_band_common"))
-                self.show_figure(page, group_figure(result, labels[i], t), notes)
+                fig = group_figure(
+                    result,
+                    self.active_series,
+                    t,
+                    band=result.settings.band,
+                    show_samples=self.show_samples,
+                    omnibus=om,
+                )
+                self._show_figure(page_layout, fig, notes)
             else:
-                ttk.Label(page, text=t("no_summary"), wraplength=550).pack(anchor="w")
+                page_layout.addWidget(QLabel(t("no_summary")))
+                page_layout.addStretch(1)
+
         elif self.view == "view_roi":
-            patterns = result.patterns
-            i = self.selected_item(page, [f"{p.sample} / {p.roi}  ·  {p.label or t('all')}" for p in patterns])
-            p = patterns[i]
-            note = t("inference", status=t(p.status), null=t(p.null), n=p.count)
-            if p.target_count is not None:
-                note += t("n_targets", n=p.target_count)
-            notes = [note + "  ·  " + t(p.window.correction)]
-            notes.extend(self.envelope_notes(p.envelope, p.p_adjusted))
-            shown = len(select_indices(len(p.xy)))
-            if shown < len(p.xy):
-                notes.append(t("point_count_drawn", n=shown, total=len(p.xy)))
-            notes.extend(t(qc) for qc in p.qc)
-            self.show_figure(page, roi_figure(result, p, t), notes)
+            self._render_roi_view(page_layout, result)
+
         elif self.view == "view_contrast":
-            contrasts = result.contrasts
+            self._grouping_toolbar(page_layout, include_band=False, include_design=True)
+            comp = result.comparison
+            contrasts = result.contrasts or (comp.contrasts if comp else [])
+            om = comp.omnibus if (not result.contrasts and comp) else None
             if contrasts:
-                i = self.selected_item(page, [c.label or t("all") for c in contrasts])
-                c = contrasts[i]
-                notes = [f"{c.a} (N={c.n_a})  ·  {c.b} (N={c.n_b})"]
-                notes.extend(self.envelope_notes(c.envelope, c.p_adjusted))
-                self.show_figure(page, contrast_figure(result, c, t), notes)
+                items = []
+                if om is not None and om.k_groups >= 3:
+                    items.append(("omnibus", om, t("omnibus_view_item", k=om.k_groups, p=om.p_global)))
+                for c in contrasts:
+                    items.append(
+                        ("pair", c, t("pairwise_view_item", a=c.a, b=c.b, p=c.envelope.p, holm=c.p_adjusted))
+                    )
+                idx = min(self.selected.get("view_contrast", 0), len(items) - 1)
+                if len(items) >= 2:
+                    sel_combo = QComboBox()
+                    sel_combo.addItems([it[2] for it in items])
+                    sel_combo.setCurrentIndex(idx)
+                    sel_combo.setMaximumWidth(560)
+
+                    def on_item_select(new_i: int):
+                        self.selected["view_contrast"] = new_i
+                        self.render_view()
+
+                    sel_combo.currentIndexChanged.connect(on_item_select)
+                    page_layout.addWidget(sel_combo)
+
+                kind, obj, _ = items[idx]
+                if kind == "omnibus":
+                    notes = []
+                    banner = self._format_omnibus_banner(obj)
+                    if banner:
+                        notes.append(banner)
+                    fig = omnibus_figure(result, obj, t)
+                else:
+                    c = obj
+                    design_txt = t("design_tag_" + c.design)
+                    n_txt = (
+                        f"N={c.n_paired} paired"
+                        if c.design == "paired"
+                        else f"N_A={c.n_a}, N_B={c.n_b}" + (f" ({c.n_paired} shared)" if c.n_paired else "")
+                    )
+                    notes = [f"{c.a} vs {c.b}  ·  {design_txt} ({n_txt})"]
+                    notes.extend(self.envelope_notes(c.envelope, c.p_adjusted))
+                    fig = contrast_figure(result, c, t)
+
+                self._show_figure(page_layout, fig, notes)
+                self._build_stats_table(page_layout, om, contrasts, active_row=idx)
             else:
-                ttk.Label(page, text=t("no_contrast"), wraplength=550).pack(anchor="w")
+                msg = QLabel(t("stats_need_two_groups"))
+                msg.setWordWrap(True)
+                page_layout.addWidget(msg)
+                page_layout.addStretch(1)
+
         else:
-            self.qc_table(page, result.qc)
-        self.pdf_btn.configure(state="normal" if self.figure is not None else "disabled")
+            self._build_qc_table(page_layout, result.qc)
+
+        self.pdf_btn.setEnabled(self.figure is not None)
+
+    def _render_roi_view(self, page_layout: QVBoxLayout, result):
+        t = self.t
+        all_patterns = result.patterns
+        groups = list(dict.fromkeys(p.group for p in all_patterns if p.group != ""))
+        types = list(dict.fromkeys(p.label for p in all_patterns))
+
+        filter_bar = QHBoxLayout()
+        if len(groups) >= 2:
+            filter_bar.addWidget(QLabel(t("filter_group")))
+            g_combo = QComboBox()
+            g_items = [t("filter_all")] + groups
+            g_combo.addItems(g_items)
+            if self.roi_filter_group in groups:
+                g_combo.setCurrentIndex(groups.index(self.roi_filter_group) + 1)
+
+            def on_g(i: int):
+                self.roi_filter_group = None if i == 0 else groups[i - 1]
+                self.selected["view_roi"] = 0
+                self.render_view()
+
+            g_combo.currentIndexChanged.connect(on_g)
+            filter_bar.addWidget(g_combo)
+
+        if len(types) >= 2:
+            filter_bar.addWidget(QLabel(t("filter_type")))
+            t_combo = QComboBox()
+            t_disp = [t("filter_all")] + [tp or t("all") for tp in types]
+            t_combo.addItems(t_disp)
+            if self.roi_filter_type is not None and self.roi_filter_type in types:
+                t_combo.setCurrentIndex(types.index(self.roi_filter_type) + 1)
+
+            def on_t(i: int):
+                self.roi_filter_type = None if i == 0 else types[i - 1]
+                self.selected["view_roi"] = 0
+                self.render_view()
+
+            t_combo.currentIndexChanged.connect(on_t)
+            filter_bar.addWidget(t_combo)
+
+        filtered = [
+            p
+            for p in all_patterns
+            if (self.roi_filter_group is None or p.group == self.roi_filter_group)
+            and (self.roi_filter_type is None or p.label == self.roi_filter_type)
+        ]
+        if not filtered:
+            filtered = all_patterns
+
+        idx = min(self.selected.get("view_roi", 0), len(filtered) - 1)
+        roi_combo = QComboBox()
+        roi_combo.addItems(
+            [
+                f"{p.group + ' · ' if p.group else ''}{p.sample} / {p.roi}  ·  {p.label or t('all')}"
+                for p in filtered
+            ]
+        )
+        roi_combo.setCurrentIndex(idx)
+        roi_combo.setMinimumWidth(320)
+
+        def on_roi(new_i: int):
+            self.selected["view_roi"] = new_i
+            self.render_view()
+
+        roi_combo.currentIndexChanged.connect(on_roi)
+        filter_bar.addWidget(roi_combo, stretch=1)
+        page_layout.addLayout(filter_bar)
+
+        p = filtered[idx]
+        note = t("inference", status=t(p.status), null=t(p.null), n=p.count)
+        if p.target_count is not None:
+            note += t("n_targets", n=p.target_count)
+        notes = [note + "  ·  " + t(p.window.correction)]
+        notes.extend(self.envelope_notes(p.envelope, p.p_adjusted))
+        shown = len(select_indices(len(p.xy)))
+        if shown < len(p.xy):
+            notes.append(t("point_count_drawn", n=shown, total=len(p.xy)))
+        notes.extend(t(qc) for qc in p.qc)
+        self._show_figure(page_layout, roi_figure(result, p, t), notes)
+
+    def _build_stats_table(self, page_layout: QVBoxLayout, omnibus, contrasts, active_row: int = 0):
+        t = self.t
+        unit = self.results.data.calibration.unit
+        hint = QLabel(t("click_row_hint"))
+        hint.setObjectName("MutedLabel")
+        page_layout.addWidget(hint)
+
+        rows_data = []
+
+        def fmt_p(p):
+            if p is None or not np.isfinite(p):
+                return "—"
+            return f"{p:.4g}{' *' if p <= 0.05 else ''}"
+
+        def fmt_spans(spans):
+            if not spans:
+                return "—"
+            txt = ", ".join(f"{lo:g}–{hi:g}" for _, lo, hi in spans[:2])
+            return f"{txt} {unit}" + (" …" if len(spans) > 2 else "")
+
+        if omnibus is not None and omnibus.k_groups >= 3:
+            rows_data.append(
+                (
+                    f"[Omnibus] {' / '.join(omnibus.series_names)}",
+                    f"{t('design_tag_' + omnibus.design)} ({omnibus.k_groups}g)",
+                    fmt_p(omnibus.p_global),
+                    fmt_p(omnibus.p_global),
+                    fmt_spans(omnibus.significant_spans),
+                    f"{t(omnibus.parametric_test)}: {fmt_p(omnibus.parametric_p)}" if omnibus.parametric_test else "—",
+                    f"{t(omnibus.nonparametric_test)}: {fmt_p(omnibus.nonparametric_p)}"
+                    if omnibus.nonparametric_test
+                    else "—",
+                )
+            )
+        for c in contrasts:
+            spans = interval_strings(self.results.radii, c.envelope.side)
+            d_str = (
+                f"{t('design_tag_paired')} (N={c.n_paired})"
+                if c.design == "paired"
+                else f"{t('design_tag_' + c.design)} ({c.n_a},{c.n_b})"
+            )
+            p_used = (
+                c.parametric_p_holm
+                if len(contrasts) > 1 and np.isfinite(c.parametric_p_holm)
+                else c.parametric_p
+            )
+            np_used = (
+                c.nonparametric_p_holm
+                if len(contrasts) > 1 and np.isfinite(c.nonparametric_p_holm)
+                else c.nonparametric_p
+            )
+            rows_data.append(
+                (
+                    f"{c.a} − {c.b}",
+                    d_str,
+                    fmt_p(c.envelope.p),
+                    fmt_p(c.p_adjusted),
+                    fmt_spans(spans),
+                    f"{t(c.parametric_test)}: {fmt_p(p_used)}" if c.parametric_test else "—",
+                    f"{t(c.nonparametric_test)}: {fmt_p(np_used)}" if c.nonparametric_test else "—",
+                )
+            )
+
+        headers = [
+            t("col_comparison"),
+            t("col_design"),
+            t("col_p_global"),
+            t("col_p_holm"),
+            t("col_sig_r"),
+            t("col_param"),
+            t("col_nonparam"),
+        ]
+        table = QTableWidget(len(rows_data), len(headers))
+        table.setHorizontalHeaderLabels(headers)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        table.setAlternatingRowColors(True)
+        table.verticalHeader().setVisible(False)
+        table.verticalHeader().setDefaultSectionSize(25)
+        table.setMaximumHeight(min(185, 34 + 26 * len(rows_data)))
+
+        for r_idx, r_vals in enumerate(rows_data):
+            for c_idx, val in enumerate(r_vals):
+                table.setItem(r_idx, c_idx, QTableWidgetItem(val))
+
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        for col in (1, 2, 3, 5, 6):
+            table.resizeColumnToContents(col)
+        if 0 <= active_row < len(rows_data):
+            table.selectRow(active_row)
+
+        def on_row_clicked(row_idx: int, _col: int):
+            if row_idx != self.selected.get("view_contrast", 0):
+                self.selected["view_contrast"] = row_idx
+                self.render_view()
+
+        table.cellClicked.connect(on_row_clicked)
+        page_layout.addWidget(table)
 
     def envelope_notes(self, env, adjusted):
         if env is None:
@@ -500,61 +1601,103 @@ class SpatialAnalysisGUI:
             notes.append(t("masked_scales"))
         spans = interval_strings(self.results.radii, env.side)
         if spans:
-            notes.append("  ·  ".join(t("scale_span", direction=t(direction), lo=lo, hi=hi,
-                                        unit=self.results.data.calibration.unit) for direction, lo, hi in spans[:4])
-                         + ("  …" if len(spans) > 4 else ""))
+            notes.append(
+                "  ·  ".join(
+                    t("scale_span", direction=t(direction), lo=lo, hi=hi, unit=self.results.data.calibration.unit)
+                    for direction, lo, hi in spans[:4]
+                )
+                + ("  …" if len(spans) > 4 else "")
+            )
             if adjusted > .05:
                 notes.append(t("p_family_note"))
         return notes
 
-    def show_figure(self, parent, figure, notes):
+    def _show_figure(self, layout: QVBoxLayout, figure, notes: list[str]):
         self.figure = figure
         for note in notes:
-            ttk.Label(parent, text=note, wraplength=690, style="Muted.TLabel").pack(fill="x", anchor="w", pady=1)
-        canvas = FigureCanvasTkAgg(figure, master=parent)
-        toolbar = PlotToolbar(canvas, parent, self.t)
-        toolbar.pack(side="bottom", fill="x")
-        canvas.get_tk_widget().pack(fill="both", expand=True, pady=(5, 0))
+            lbl = QLabel(note)
+            lbl.setWordWrap(True)
+            lbl.setObjectName("MutedLabel")
+            layout.addWidget(lbl)
+        canvas = FigureCanvasQTAgg(figure)
+        toolbar = PlotToolbar(canvas, self, self.t)
+        layout.addWidget(canvas, stretch=1)
+        layout.addWidget(toolbar)
         canvas.draw_idle()
 
-    def qc_table(self, parent, records):
+    def _build_qc_table(self, layout: QVBoxLayout, records):
         t = self.t
         if records.empty:
-            ttk.Label(parent, text=t("no_qc")).pack(anchor="w")
+            layout.addWidget(QLabel(t("no_qc")))
+            layout.addStretch(1)
             return
-        panel = ttk.Frame(parent)
-        panel.pack(fill="both", expand=True)
-        fields = ("name", "row", "sample_id", "roi_id", "reason")
-        tree = ttk.Treeview(panel, columns=fields, show="headings")
-        scroll = ttk.Scrollbar(panel, command=tree.yview)
-        tree.configure(yscrollcommand=scroll.set)
-        scroll.pack(side="right", fill="y")
-        tree.pack(fill="both", expand=True)
-        for field, width in zip(fields, (130, 58, 75, 68, 350)):
-            tree.column(field, width=width, minwidth=45, stretch=field == "reason")
-            tree.heading(field, text=t(field))
-        if len(records) > 250:
-            ttk.Label(parent, text=t("qc_limit", count=len(records)), style="Muted.TLabel").pack(anchor="w")
-        columns = ["source", "row", "sample_id", "roi_id", "reason"]
-        for source, row, sample, roi, reason in records.head(250).reindex(columns=columns).fillna("").itertuples(index=False, name=None):
-            tree.insert("", "end", values=(Path(source).name if source else "", row, sample, roi, t(reason)))
+
+        search_edit = QLineEdit(self.qc_search_text)
+        search_edit.setPlaceholderText(t("search_placeholder"))
+        layout.addWidget(search_edit)
+
+        headers = [t("name"), t("row"), t("sample_id"), t("roi_id"), t("reason")]
+        cols = ["source", "row", "sample_id", "roi_id", "reason"]
+        subset = records.head(1000).reindex(columns=cols).fillna("")
+        rows = [
+            (Path(src).name if src else "", str(row), str(sample), str(roi), t(str(reason)))
+            for src, row, sample, roi, reason in subset.itertuples(index=False, name=None)
+        ]
+
+        table = QTableWidget(len(rows), len(headers))
+        table.setHorizontalHeaderLabels(headers)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setAlternatingRowColors(True)
+        table.setSortingEnabled(True)
+        table.verticalHeader().setVisible(False)
+        table.verticalHeader().setDefaultSectionSize(25)
+        for r_idx, r_vals in enumerate(rows):
+            for c_idx, val in enumerate(r_vals):
+                table.setItem(r_idx, c_idx, QTableWidgetItem(val))
+        table.resizeColumnsToContents()
+        table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+
+        def filter_rows(query: str):
+            self.qc_search_text = query
+            q = query.strip().casefold()
+            for r_idx in range(table.rowCount()):
+                match = not q or any(
+                    q in (table.item(r_idx, c).text().casefold() if table.item(r_idx, c) else "")
+                    for c in range(table.columnCount())
+                )
+                table.setRowHidden(r_idx, not match)
+
+        search_edit.textChanged.connect(filter_rows)
+        if self.qc_search_text:
+            filter_rows(self.qc_search_text)
+
+        if len(records) > 1000:
+            lim = QLabel(t("qc_limit", count=len(records)))
+            lim.setObjectName("MutedLabel")
+            layout.addWidget(lim)
+        layout.addWidget(table, stretch=1)
 
     def export_pdf(self):
         if self.figure is None:
             return
         t = self.t
-        filename = filedialog.asksaveasfilename(parent=self.root, title=t("pdf"), initialfile="spatial-pattern.pdf",
-                                                defaultextension=".pdf", filetypes=[("PDF", "*.pdf")])
+        filename, _ = QFileDialog.getSaveFileName(
+            self,
+            t("export_figure"),
+            "spatial-pattern.pdf",
+            "PDF (*.pdf);;SVG (*.svg);;PNG 300 DPI (*.png)",
+        )
         if filename:
             try:
-                save_pdf(self.figure, filename, t("title"))
+                save_figure(self.figure, filename, t("title"))
                 self.set_status("saved", file=Path(filename).name)
             except Exception as error:
-                show_error(self.root, t, error)
+                show_error(self, t, error)
 
     def clear_results(self):
         if self.job is None:
             self.results = None
+            self.active_series.clear()
             self.set_status("ready")
             self.render_main()
 
@@ -562,47 +1705,69 @@ class SpatialAnalysisGUI:
         if self.results is None:
             return
         t = self.t
-        filename = filedialog.asksaveasfilename(parent=self.root, title=t("data_export"), initialfile="spatial-results.xlsx",
-                                                defaultextension=".xlsx", filetypes=[("Excel", "*.xlsx"), ("CSV (ZIP)", "*.zip")])
+        filename, _ = QFileDialog.getSaveFileName(
+            self,
+            t("data_export"),
+            "spatial-results.xlsx",
+            "Excel (*.xlsx);;CSV ZIP (*.zip)",
+        )
         if filename:
             try:
                 export_data(self.results, filename)
                 self.set_status("saved", file=Path(filename).name)
             except Exception as error:
-                show_error(self.root, t, error)
+                show_error(self, t, error)
+
+    def export_batch(self):
+        if self.results is None:
+            return
+        t = self.t
+        folder = QFileDialog.getExistingDirectory(self, t("batch_export_title"))
+        if folder:
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            try:
+                written = export_batch_bundle(
+                    self.results,
+                    folder,
+                    t,
+                    band=self.results.settings.band,
+                    show_samples=self.show_samples,
+                )
+                self.set_status("batch_saved", n=len(written), folder=Path(folder).name)
+            except Exception as error:
+                show_error(self, t, error)
+            finally:
+                QApplication.restoreOverrideCursor()
 
     def methods(self):
-        t = self.t
-        dialog = modal(self.root, t("methods"))
-        dialog.geometry("800x625")
-        base = frame(dialog)
-        from tkinter.scrolledtext import ScrolledText
-
-        text = ScrolledText(base, wrap="word", padx=13, pady=11, bg=WHITE, fg=INK, relief="flat")
-        text.pack(fill="both", expand=True)
-        document = ASSETS / ("README.zh-TW.md" if t.lang == "zh-TW" else "README.md")
-        text.insert("1.0", document.read_text(encoding="utf-8-sig"))
-        text.configure(state="disabled")
-        ttk.Button(base, text=t("close"), command=dialog.destroy).pack(anchor="e", pady=(8, 0))
+        document = ASSETS / ("README.zh-TW.md" if self.t.lang == "zh-TW" else "README.md")
+        methods_dialog(self, self.t, document)
 
 
-def smoke_test(path):
+def smoke_test(path: Path):
+    path = Path(path)
     path.mkdir(parents=True, exist_ok=True)
     try:
-        import xlrd
+        if sys.platform != "win32" and not os.environ.get("DISPLAY"):
+            os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        if getattr(sys, "frozen", False):
+            import xlrd
 
-        assert xlrd.__version__
-        root = tk.Tk()
-        root.withdraw()
-        app = SpatialAnalysisGUI(root)
-        app.data = demo_data()
-        app.results = run_analysis(app.data, Settings(roi_mode="rectangle", simulations=19))
+            assert xlrd.__version__
+        app = QApplication.instance() or QApplication([])
+        window = SpatialAnalysisGUI("en")
+        window.data = demo_data()
+        window._configure_defaults_for_dataset()
+        window.results = run_analysis(window.data, Settings(roi_mode="rectangle", simulations=19))
+        window.render_main()
         for lang in ("en", "zh-TW"):
             t = Translator(lang)
-            save_pdf(group_figure(app.results, "", t), path / f"groups-{lang}.pdf", t("title"))
-        export_data(app.results, path / "results.xlsx")
-        root.update_idletasks()
-        root.destroy()
+            save_pdf(group_figure(window.results, "", t), path / f"groups-{lang}.pdf", t("title"))
+        export_data(window.results, path / "results.xlsx")
+        app.processEvents()
+        window.close()
+        window.deleteLater()
+        app.processEvents()
     except Exception:
         from traceback import format_exc
 
@@ -616,13 +1781,12 @@ def main():
         return
     if len(sys.argv) != 1:
         raise SystemExit("Usage: spatial_analysis_gui.py [--smoke-test OUTPUT_DIRECTORY]")
-    root = tk.Tk()
-    root.geometry("1200x790")
-    root.minsize(920, 650)
+    app = QApplication(sys.argv)
     language = locale.getlocale()[0] or ""
     zh = language.casefold().startswith(("zh_tw", "zh_hk", "chinese (traditional)"))
-    SpatialAnalysisGUI(root, "zh-TW" if zh else "en")
-    root.mainloop()
+    window = SpatialAnalysisGUI("zh-TW" if zh else "en")
+    window.show()
+    raise SystemExit(app.exec())
 
 
 if __name__ == "__main__":

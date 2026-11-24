@@ -8,4 +8,5 @@ venv/
 .build/
 .builddeps/
 .smoke/
+.pytest_cache/
 dist/
