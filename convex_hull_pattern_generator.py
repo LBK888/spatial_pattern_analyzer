@@ -43,7 +43,7 @@ def write_demo(path):
 
     path = Path(path)
     rng = np.random.default_rng(2406)
-    window = make_window("rectangle", [], (0, 0, 200, 160))
+    window = make_window("custom", [], (0, 0, 200, 160))
     with path.open("w", newline="", encoding="utf-8") as stream:
         out = csv.writer(stream)
         out.writerow(["sample_id", "roi_id", "group", "cell_type", "x", "y",

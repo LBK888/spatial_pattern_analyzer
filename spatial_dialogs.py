@@ -39,7 +39,7 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolb
 from matplotlib.figure import Figure
 from shapely.geometry import Polygon
 
-from ripley_analysis import IntensityGrid, make_window
+from ripley_analysis import IntensityGrid, make_window, valid_bounds_box
 from spatial_data import (
     COLUMNS,
     RECT_COLUMNS,
@@ -593,7 +593,11 @@ def advanced_dialog(parent, t, data, settings, intensity_path, callback):
         dist_layout, t, "edge_correction", edge_labels, edge_labels[edge_keys.index(cur_edge)]
     )
     use_fixed_cb = make_flag(dist_layout, t, "use_fixed_r", settings.r_step is not None)
-    keys = ("r_min", "r_max", "r_step", "n_radii", "hull_ratio", "local_radius")
+    keys = ["r_min", "r_max", "r_step", "n_radii", "local_radius"]
+    if (settings.roi_mode == "infer" and not settings.convex_guard) or (
+        settings.roi_mode == "rectangle" and settings.rectangle_hull == "concave"
+    ):
+        keys.insert(-1, "hull_ratio")
     scale_edits = {
         key: make_entry(
             dist_layout, t, key, "" if getattr(settings, key) is None else getattr(settings, key)
@@ -615,7 +619,6 @@ def advanced_dialog(parent, t, data, settings, intensity_path, callback):
     cur_mark = settings.marks if settings.marks in modes else "each_and_merged"
     marks_combo = make_choice(test_layout, t, "marks", modes, cur_mark)
     merge_req_cb = make_flag(test_layout, t, "merge_require_all", settings.merge_require_all)
-    infer_each_cb = make_flag(test_layout, t, "infer_per_label", settings.infer_per_label)
     categories = sorted_types(data.points.cell_type) if data is not None else []
     focal_combo = make_choice(
         test_layout, t, "from_type", categories, settings.from_type, "cross_help", translated=False
@@ -716,7 +719,6 @@ def advanced_dialog(parent, t, data, settings, intensity_path, callback):
                 test=run_test_cb.isChecked(),
                 marks=modes[marks_combo.currentIndex()],
                 merge_require_all=merge_req_cb.isChecked(),
-                infer_per_label=infer_each_cb.isChecked(),
                 simulations=parse_number(sim_edit, int, t, "simulations"),
                 seed=parse_number(seed_edit, int, t, "seed"),
                 workers=parse_number(workers_edit, int, t, "workers"),
@@ -1019,12 +1021,12 @@ def rectangle_dialog(parent, t, calibration, current_rect, callback):
                 parse_number(ed, float, t, key) * factors[i % 2]
                 for i, (key, ed) in enumerate(zip(RECT_COLUMNS, edits))
             )
-            make_window("rectangle", [], bounds)
+            geometry = valid_bounds_box(bounds)
         except ValueError as error:
             show_error(dialog, t, error)
             return
         dialog.accept()
-        callback(bounds)
+        callback(geometry)
 
     dialog_buttons(dialog, root, t, on_accept)
     dialog.exec()

@@ -4,10 +4,12 @@ from dataclasses import dataclass, field
 from threading import Event, Lock
 
 import numpy as np
+from scipy.optimize import LinearConstraint, minimize
 from scipy.spatial import cKDTree
 from scipy.stats import rankdata
 import shapely
 from shapely.geometry import MultiPoint, box
+from shapely.geometry.polygon import orient
 from shapely.ops import polylabel
 
 
@@ -152,22 +154,135 @@ class Window:
         return min(limit, clearance * 0.65)
 
 
-def make_window(mode, points, bounds=None, geometry=None, hull_ratio=0.35, edge_mode="auto"):
-    if mode == "rectangle":
+def _convex_rectangle(polygon):
+    # A rectangle with center (x, y) and half-sides (w, h) is in every hull
+    # half-plane n·p <= b exactly when nx*x + ny*y + |nx|*w + |ny|*h <= b.
+    vertices = np.asarray(orient(polygon).exterior.coords)
+    edges = np.diff(vertices, axis=0)
+    normals = np.column_stack((edges[:, 1], -edges[:, 0]))
+    normals /= np.linalg.norm(normals, axis=1)[:, None]
+    offsets = (normals * vertices[:-1]).sum(axis=1)
+    constraints = np.column_stack((normals, np.abs(normals)))
+    center = np.asarray(polygon.centroid.coords[0])
+    slack = offsets - normals @ center
+    half_size = max(float(np.min(slack / np.abs(normals).sum(axis=1))) / 2, 1e-15)
+    result = minimize(
+        lambda p: -np.log(p[2:]).sum(),
+        [*center, half_size, half_size],
+        jac=lambda p: np.array([0., 0., -1 / p[2], -1 / p[3]]),
+        method="SLSQP",
+        bounds=[(0, 1), (0, 1), (1e-15, .5), (1e-15, .5)],
+        constraints=LinearConstraint(constraints, -np.inf, offsets),
+        options={"ftol": 1e-12},
+    )
+    if result.success:
+        return np.r_[result.x[:2] - result.x[2:], result.x[:2] + result.x[2:]]
+    return None
+
+
+def _grid_rectangle(polygon, stop):
+    # Search all rectangles made from fully covered cells. A histogram stack
+    # visits each cell once after classification, including across narrow notches.
+    size = 192
+    grid = np.linspace(0, 1, size + 1)
+    x, y = np.meshgrid(grid[:-1], grid[:-1])
+    x1, y1 = np.meshgrid(grid[1:], grid[1:])
+    cells = shapely.box(x.ravel(), y.ravel(), x1.ravel(), y1.ravel())
+    covered = shapely.covers(polygon, cells).reshape(size, size)
+    heights = np.zeros(size, dtype=int)
+    best, best_area = None, 0
+    for row, mask in enumerate(covered):
+        check_cancel(stop)
+        heights = (heights + 1) * mask
+        stack = []
+        for column, height in enumerate([*heights, 0]):
+            left = column
+            while stack and stack[-1][1] > height:
+                left, top_height = stack.pop()
+                area = top_height * (column - left)
+                if area > best_area:
+                    best_area = area
+                    best = np.array([left, row + 1 - top_height, column, row + 1]) / size
+            if not stack or stack[-1][1] < height:
+                stack.append((left, height))
+    if best is None:
+        point = polylabel(polygon, tolerance=1 / (size * 8))
+        center = np.asarray(point.coords[0])
+        half = point.distance(polygon.boundary) / 2
+        best = np.r_[center - half, center + half]
+
+    # Refine grid-aligned sides against the original polygon. Reverse the
+    # expansion order as well, since a sloping edge can trade width for height.
+    candidates = [best]
+    for sides in ((0, 2, 1, 3), (1, 3, 0, 2), (2, 0, 3, 1), (3, 1, 2, 0)):
+        bounds = best.copy()
+        for side in sides:
+            check_cancel(stop)
+            good, outside = bounds[side], float(side >= 2)
+            for _ in range(32):
+                bounds[side] = (good + outside) / 2
+                if polygon.covers(box(*bounds)):
+                    good = bounds[side]
+                else:
+                    outside = bounds[side]
+            bounds[side] = good
+        candidates.append(bounds)
+    return max(candidates, key=lambda b: np.prod(b[2:] - b[:2]))
+
+
+def largest_inner_rectangle(polygon, stop=None):
+    """Fit an axis-aligned rectangle. Concave fits use a grid and side refinement."""
+    check_cancel(stop)
+    outer = box(*polygon.bounds)
+    if polygon.equals(outer):
+        return outer
+    origin = np.array(polygon.bounds[:2])
+    scale = np.array(polygon.bounds[2:]) - origin
+    normalized = shapely.transform(polygon, lambda xy: (xy - origin) / scale)
+    shapely.prepare(normalized)
+    convex = polygon.equals(polygon.convex_hull)
+
+    def covered_rectangle(bounds):
         if bounds is None:
-            raise ValueError("missing_rectangle")
-        x0, y0, x1, y1 = bounds
-        if not np.all(np.isfinite(bounds)) or x1 <= x0 or y1 <= y0:
-            raise ValueError("invalid_rectangle")
-        geometry = box(x0, y0, x1, y1)
-    elif mode == "custom":
+            return None
+        center = (bounds[:2] + bounds[2:]) / 2
+        for shrink in (0, 1e-12, 1e-10, 1e-8, 1e-6):
+            b = (bounds - np.tile(center, 2)) * (1 - shrink) + np.tile(center, 2)
+            rect = box(*(b * np.tile(scale, 2) + np.tile(origin, 2)))
+            if rect.area > 0 and polygon.covers(rect):
+                return rect
+        return None
+
+    if convex:
+        result = covered_rectangle(_convex_rectangle(normalized))
+        if result is not None:
+            return result
+    result = covered_rectangle(_grid_rectangle(normalized, stop))
+    if result is None:
+        raise ValueError("invalid_roi")
+    return result
+
+
+def valid_bounds_box(bounds):
+    x0, y0, x1, y1 = bounds
+    if not np.all(np.isfinite(bounds)) or x1 <= x0 or y1 <= y0:
+        raise ValueError("invalid_rectangle")
+    return box(x0, y0, x1, y1)
+
+
+def make_window(mode, points, bounds=None, geometry=None, hull_ratio=0.35, edge_mode="auto",
+                *, rectangle_hull="convex", stop=None):
+    if mode == "custom":
+        if geometry is None and bounds is not None:
+            geometry = valid_bounds_box(bounds)
         if geometry is None:
             raise ValueError("missing_roi")
-    elif mode in ("infer", "locked"):
+    elif mode in ("infer", "locked", "rectangle"):
         cloud = MultiPoint(points)
+        convex = mode == "locked" or (mode == "rectangle" and rectangle_hull == "convex")
         geometry = (
             cloud.convex_hull
-            if (mode == "locked" or hull_ratio >= 0.999)
+            if convex or hull_ratio >= 0.999
             else shapely.concave_hull(cloud, ratio=hull_ratio)
         )
     else:
@@ -179,6 +294,8 @@ def make_window(mode, points, bounds=None, geometry=None, hull_ratio=0.35, edge_
         or geometry.area <= 0
     ):
         raise ValueError("invalid_roi")
+    if mode == "rectangle":
+        geometry = largest_inner_rectangle(geometry, stop)
     shapely.prepare(geometry)
     return Window(geometry, mode, edge_mode=edge_mode)
 
@@ -320,7 +437,7 @@ def ripley(points, window, radii, targets=None, intensity=None, stop=None, corre
     eff_corr = window.effective_correction(correction)
     area = window.area
     tree = cKDTree(other)
-    rect_translation = window.is_rectangle and eff_corr in ("translation", "isotropic")
+    rect_translation = window.is_rectangle and eff_corr == "translation"
 
     if rect_translation:
         x0, y0, x1, y1 = window.geometry.bounds
@@ -354,8 +471,8 @@ def ripley(points, window, radii, targets=None, intensity=None, stop=None, corre
             denominator = len(xy) * (len(other) - (0 if cross else 1))
             return np.divide(numerator, float(denominator), out=np.full(len(r), np.nan), where=denominator > 0)
 
-        # Rectangle with explicit translation/isotropic beyond shorter side via Ohser (1983) angular factor
-        short_side, long_side = float(size.min()), float(size.max())
+        # For larger radii explicit translation falls through to the angular factor.
+        short_side = float(size.min())
         if r[-1] < short_side:
             starts = np.zeros(len(r) + 1)
             block = max(1, min(512, 400_000 // len(other)))

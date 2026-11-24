@@ -16,6 +16,7 @@ try {
         "--distpath", $Output, "--workpath", ".build/pyinstaller", "--specpath", ".build",
         "--hidden-import", "xlrd",
         "--hidden-import", "PyQt6.sip",
+        "--hidden-import", "PyQt6.QtSvg",
         "--hidden-import", "matplotlib.backends.backend_pdf",
         "--hidden-import", "matplotlib.backends.backend_svg",
         "--hidden-import", "matplotlib.backends.backend_qtagg",
@@ -25,6 +26,7 @@ try {
         "--add-data", "$PSScriptRoot/demo/points.csv:demo", "--add-data", "$PSScriptRoot/README.md:.",
         "--add-data", "$PSScriptRoot/README.zh-TW.md:.", "--add-data", "$PSScriptRoot/CITATION.bib:.",
         "--add-data", "$PSScriptRoot/LICENSE:.",
+        "--add-data", "$PSScriptRoot/ui/checked.svg:ui",
         "$PSScriptRoot/spatial_analysis_gui.py"
     )
     & $Python -m PyInstaller @buildArgs

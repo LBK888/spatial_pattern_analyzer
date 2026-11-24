@@ -33,7 +33,7 @@ from ripley_analysis import (
 from spatial_data import ISSUE_COLUMNS, issue_rows
 
 
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 ALL = ""
 MERGED_SEP = " + "
 
@@ -53,9 +53,10 @@ def task_rng(seed: int, *parts: str) -> np.random.Generator:
 class Settings:
     roi_mode: str = "infer"
     edge_correction: str = "auto"
-    rectangle: tuple | None = None
+    rectangle_hull: str = "convex"
     custom: dict = field(default_factory=dict)
     hull_ratio: float = .35
+    convex_guard: bool = False
     r_min: float | None = None
     r_max: float | None = None
     n_radii: int = 60
@@ -80,6 +81,14 @@ class Settings:
     group_b: str = ""
     local_radius: float | None = None
 
+    @property
+    def effective_hull_ratio(self):
+        return 1.0 if self.roi_mode == "infer" and self.convex_guard else self.hull_ratio
+
+    @property
+    def fit_per_label(self):
+        return self.roi_mode == "locked" or (self.roi_mode == "infer" and self.infer_per_label)
+
     def validate(self):
         if (
             not 19 <= self.simulations <= 9999
@@ -87,6 +96,7 @@ class Settings:
             or not 0 <= self.hull_ratio <= 1
             or not 0 <= self.workers <= 64
             or self.edge_correction not in EDGE_MODES
+            or self.rectangle_hull not in ("convex", "concave")
             or self.perm_stat not in ("welch", "diff")
         ):
             raise ValueError("invalid_settings")
@@ -108,7 +118,10 @@ class Settings:
                 raise ValueError("invalid_radii")
         if self.marks == "cross" and (not self.from_type or not self.to_type or self.from_type == self.to_type):
             raise ValueError("choose_two_types")
-        if self.intensity is not None and (self.roi_mode != "rectangle" or self.marks in ("cross", "cross_all")):
+        if self.intensity is not None and (
+            self.roi_mode != "custom" or self.marks in ("cross", "cross_all")
+            or self.edge_correction not in ("auto", "translation")
+        ):
             raise ValueError("intensity_rectangle_only")
         if self.local_radius is not None and (self.intensity is not None or self.marks in ("cross", "cross_all")):
             raise ValueError("local_uniform_only")
@@ -134,6 +147,7 @@ class Pattern:
     qc: list[str]
     p_adjusted: float = np.nan
     local: np.ndarray | None = None
+    cross_pair: tuple[str, str] | None = None
 
 
 @dataclass
@@ -237,13 +251,13 @@ def merged_label(types: tuple[str, ...] | list[str]) -> str:
     return MERGED_SEP.join(types)
 
 
-def default_fixed_grid(data) -> tuple[float, float, float]:
+def default_fixed_grid(data, *, use_known_bounds=True) -> tuple[float, float, float]:
     """Choose a clean default fixed (r_min, r_max, r_step) grid with 100 points for multi-sample data."""
     if data is None or data.points.empty:
         return (0.0, 250.0, 2.5)
     spans = []
     for (sample, roi), grp in data.points.groupby(["sample_id", "roi_id"], sort=False):
-        if (sample, roi) in data.bounds:
+        if use_known_bounds and (sample, roi) in data.bounds:
             x0, y0, x1, y1 = data.bounds[(sample, roi)]
             spans.append(min(x1 - x0, y1 - y0) / 4.0)
         elif len(grp) >= 2:
@@ -343,14 +357,18 @@ def prepare(data, settings, stop):
             window = make_window(
                 settings.roi_mode,
                 xy,
-                data.bounds.get((sample, roi), settings.rectangle),
+                data.bounds.get((sample, roi)) if settings.roi_mode == "custom" else None,
                 settings.custom.get((sample, roi), settings.custom.get(None)),
-                settings.hull_ratio,
+                settings.effective_hull_ratio,
                 edge_mode=settings.edge_correction,
+                rectangle_hull=settings.rectangle_hull,
+                stop=stop,
             )
         except ValueError as error:
             issues.append(issue_rows(frame.iloc[:1], str(error)))
             continue
+        if settings.intensity is not None and not window.is_rectangle:
+            raise ValueError("intensity_rectangle_only")
         keep = inside(window, xy)
         if not keep.all():
             issues.append(issue_rows(frame.loc[~keep], "outside_roi"))
@@ -365,57 +383,44 @@ def compute_pattern(frame, window, label, radii, settings, rng, stop, subset_typ
     xy = frame[["x", "y"]].to_numpy()
     marks = frame.cell_type.to_numpy()
     cross = cross_pair is not None or settings.marks == "cross"
-    eff_window = window
     if cross:
         a, b = cross_pair if cross_pair is not None else (settings.from_type, settings.to_type)
         keep = np.isin(marks, (a, b))
-        xy, marks = xy[keep], marks[keep]
-        if settings.infer_per_label and window.mode in ("infer", "locked") and len(xy) >= 3:
-            try:
-                eff_window = make_window(
-                    window.mode, xy, hull_ratio=settings.hull_ratio, edge_mode=settings.edge_correction
-                )
-                keep_in = inside(eff_window, xy)
-                if not keep_in.all():
-                    xy, marks = xy[keep_in], marks[keep_in]
-            except ValueError:
-                eff_window = window
-        observed, targets = xy[marks == a], xy[marks == b]
+    elif subset_types is not None:
+        keep = np.isin(marks, subset_types)
+    elif settings.marks == "each":
+        keep = marks == label
     else:
-        if subset_types is not None:
-            keep = np.isin(marks, subset_types)
-            xy, marks = xy[keep], marks[keep]
-        elif settings.marks == "each":
-            keep = marks == label
-            xy, marks = xy[keep], marks[keep]
-        observed, targets = xy, None
-        if (
-            (subset_types is not None or settings.marks == "each")
-            and settings.infer_per_label
-            and window.mode in ("infer", "locked")
-            and len(observed) >= 3
-        ):
+        keep = None
+
+    eff_window = window
+    if keep is not None:
+        xy, marks = xy[keep], marks[keep]
+        if settings.fit_per_label and len(xy) >= 3:
             try:
                 eff_window = make_window(
-                    window.mode, observed, hull_ratio=settings.hull_ratio, edge_mode=settings.edge_correction
+                    window.mode, xy, hull_ratio=settings.effective_hull_ratio, edge_mode=settings.edge_correction
                 )
-                keep_in = inside(eff_window, observed)
-                if not keep_in.all():
-                    observed, marks = observed[keep_in], marks[keep_in]
-                    xy = observed
+                in_roi = inside(eff_window, xy)
+                xy, marks = xy[in_roi], marks[in_roi]
             except ValueError:
-                eff_window = window
+                pass  # A degenerate subset uses the full field's hull.
+    observed, targets = (xy[marks == a], xy[marks == b]) if cross else (xy, None)
+
+    convex_fallback = window.mode == "locked" and not cross and keep is not None and eff_window is window
+    reference = not cross and (window.mode in ("infer", "rectangle") or convex_fallback)
 
     k = ripley(observed, eff_window, radii, targets, settings.intensity, stop)
     curve = centered_l(k, radii)
     locked = (
         boundary_points(eff_window, observed)
-        if eff_window.mode == "locked" and not cross
+        if eff_window.mode == "locked" and not cross and not convex_fallback
         else np.zeros(len(observed), dtype=bool)
     )
     null = (
         "random_label" if cross
         else "fixed_intensity" if settings.intensity is not None
+        else "csr_reference" if reference
         else "locked_csr" if eff_window.mode == "locked"
         else "csr"
     )
@@ -424,24 +429,17 @@ def compute_pattern(frame, window, label, radii, settings, rng, stop, subset_typ
         qc.append("insufficient")
     if not cross and len(np.unique(observed, axis=0)) < len(observed):
         qc.append("csr_coincident")
-    if eff_window.mode == "locked" and not cross and len(observed) - locked.sum() < 3:
+    if eff_window.mode == "locked" and not cross and not convex_fallback and len(observed) - locked.sum() < 3:
         qc.append("few_interior")
-    if (
-        eff_window.mode == "locked"
-        and not cross
-        and (subset_types is not None or settings.marks == "each")
-        and not settings.infer_per_label
-    ):
-        qc.append("locked_all_only")
-    if eff_window.mode == "infer" and not cross:
-        qc.append("estimated_roi")
+    if convex_fallback:
+        qc.append("locked_subset_fallback")
     if cross and (len(observed) < 2 or len(targets) < 2):
         qc.append("too_few_for_test")
     if not cross and len(observed) < 4:
         qc.append("too_few_for_test")
 
     envelope = None
-    if settings.test and not qc:
+    if settings.test and not any(reason != "locked_subset_fallback" for reason in qc):
         if eff_window.correction == "translation" and not eff_window.is_rectangle:
             eff_window.translation_grid()
         sims = np.empty((settings.simulations + 1, len(radii)))
@@ -462,9 +460,16 @@ def compute_pattern(frame, window, label, radii, settings, rng, stop, subset_typ
                     simulated = np.vstack((observed[locked], simulated))
                 simulated_k = ripley(simulated, eff_window, radii, intensity=settings.intensity, stop=stop)
             sims[i] = centered_l(simulated_k, radii)
-        envelope = global_envelope(sims)
+        tested_curves = sims[1:] if reference else sims
+        # Require common support with the observed curve, even for the simulated reference.
+        tested_curves[:, ~np.isfinite(curve)] = np.nan
+        envelope = global_envelope(tested_curves)
         if envelope.status == "insufficient":
             qc.append("no_common_support")
+        elif reference:
+            envelope = replace(envelope, status="descriptive", p=np.nan, side=np.zeros_like(envelope.side))
+    if reference:
+        qc.append("estimated_roi")
     status = envelope.status if envelope else ("insufficient" if "insufficient" in qc else "descriptive")
     local = None
     if settings.local_radius is not None and not cross and settings.intensity is None:
@@ -586,10 +591,10 @@ def build_custom_summary(
         if len(sub_xy) < 2:
             continue
         eff_window = window
-        if subset_types is not None and settings.infer_per_label and window.mode in ("infer", "locked") and len(sub_xy) >= 3:
+        if subset_types is not None and settings.fit_per_label and len(sub_xy) >= 3:
             try:
                 eff_window = make_window(
-                    window.mode, sub_xy, hull_ratio=settings.hull_ratio, edge_mode=settings.edge_correction
+                    window.mode, sub_xy, hull_ratio=settings.effective_hull_ratio, edge_mode=settings.edge_correction
                 )
                 sub_xy = sub_xy[inside(eff_window, sub_xy)]
             except ValueError:
@@ -1345,7 +1350,8 @@ def run_analysis(data, settings, progress=lambda done, total: None, stop=None):
             subset_types=subset_types, cross_pair=cross_pair,
         )
         eff_window, *rest = res
-        return item_idx, Pattern(sample, roi, sample_groups[sample], label, eff_window, *rest)
+        pattern = Pattern(sample, roi, sample_groups[sample], label, eff_window, *rest, cross_pair=cross_pair)
+        return item_idx, pattern
 
     ordered_patterns: list[Pattern | None] = [None] * total
     if n_workers <= 1 or total <= 1:
@@ -1534,7 +1540,7 @@ def data_tables(results):
                     L_minus_r=p.curve,
                     lower=env.lower if env else np.nan,
                     upper=env.upper if env else np.nan,
-                    band_type="global_null_95" if env else "",
+                    band_type=("global_reference_95" if p.null == "csr_reference" else "global_null_95") if env else "",
                     excursion=env.side if env else 0,
                     row_type="roi",
                 )

@@ -160,7 +160,8 @@ def roi_figure(results, pattern, t):
                               norm=TwoSlopeNorm(vcenter=0, vmin=-limit, vmax=limit), alpha=.85)
         fig.colorbar(dots, ax=map_ax, shrink=.72, label=t("local_legend"))
     elif pattern.target_count is not None:
-        for i, mark in enumerate((results.settings.from_type, results.settings.to_type)):
+        pair = pattern.cross_pair or (results.settings.from_type, results.settings.to_type)
+        for i, mark in enumerate(pair):
             keep = pattern.types[indices] == mark
             map_ax.scatter(*drawn[keep].T, s=15, color=PALETTE[i], marker=("o", "^")[i], label=mark)
         map_ax.legend(frameon=False, loc="best")
@@ -175,9 +176,10 @@ def roi_figure(results, pattern, t):
     unit = results.data.calibration.unit
     env = pattern.envelope
     curve_ax.axhline(0, color=MUTED, linestyle="--", linewidth=.9, label=t("reference"))
-    if env is not None:
+    if env is not None and np.isfinite(env.lower).any():
+        band_label = "reference_band" if pattern.null == "csr_reference" else "global_band"
         curve_ax.fill_between(results.radii, env.lower, env.upper, color="#A3C8E8",
-                              alpha=.45, label=t("global_band"), linewidth=0)
+                              alpha=.45, label=t(band_label), linewidth=0)
         for sign, color in ((1, "#C05621"), (-1, "#6D3BBF")):
             out = env.side == sign
             curve_ax.scatter(results.radii[out], pattern.curve[out], s=14, color=color, zorder=5)

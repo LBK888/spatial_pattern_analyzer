@@ -26,12 +26,18 @@ from spatial_workflow import (Settings, build_custom_summary, compare_groups, co
 
 class RipleyTests(unittest.TestCase):
     def setUp(self):
-        self.rect = make_window("rectangle", [], (0, 0, 10, 10))
+        self.rect = make_window("custom", [], (0, 0, 10, 10))
 
     def test_ordered_pairs_and_exact_translation_weight(self):
         points = [[3, 4], [4, 4], [8, 8]]
         result = ripley(points, self.rect, [.9, 1.0, 2.0])
         assert_allclose(result, [0, 2 * 100 * (100 / 90) / (3 * 2), 2 * 100 * (100 / 90) / (3 * 2)])
+
+    def test_rectangle_isotropic_uses_arc_weights(self):
+        points = [[0.2, 4], [1.2, 4], [8, 8]]
+        translation = ripley(points, self.rect, [1.01], correction="translation")
+        isotropic = ripley(points, self.rect, [1.01], correction="isotropic")
+        self.assertGreater(isotropic[0], translation[0])
 
     def test_coincident_distinct_points_and_cross_k(self):
         assert_allclose(ripley([[4, 4], [4, 4]], self.rect, [1]), [100])
@@ -135,7 +141,7 @@ class WorkflowTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.data = demo_data()
-        cls.settings = Settings(roi_mode="rectangle", simulations=39, n_radii=20)
+        cls.settings = Settings(roi_mode="custom", simulations=39, n_radii=20)
         cls.results = run_analysis(cls.data, cls.settings)
 
     def test_demo_has_nine_independent_samples(self):
@@ -171,11 +177,70 @@ class WorkflowTests(unittest.TestCase):
         data = replace(self.data, points=self.data.points.iloc[:72], fields=(self.data.fields[0],))
         settings = replace(self.settings, roi_mode="infer")
         described = run_analysis(data, settings).patterns[0]
-        self.assertIsNone(described.envelope)
+        self.assertEqual(described.status, "descriptive")
+        self.assertTrue(np.isfinite(described.envelope.lower).any())
+        self.assertTrue(np.isnan(described.envelope.p))
+        self.assertFalse(described.envelope.side.any())
         cross = run_analysis(data, replace(settings, marks="cross", from_type="A", to_type="B")).patterns[0]
         self.assertIsNotNone(cross.envelope)
         self.assertEqual((cross.count, cross.target_count), (36, 36))
         self.assertEqual(cross.null, "random_label")
+
+    def test_rectangle_fits_points_instead_of_reading_bounds(self):
+        data = replace(self.data, points=self.data.points.iloc[:72], fields=(self.data.fields[0],))
+        xy = data.points[["x", "y"]].to_numpy()
+        for source in ("convex", "concave"):
+            with self.subTest(source=source):
+                raw_hull = make_window("locked" if source == "convex" else "infer", xy).geometry
+                result = run_analysis(data, Settings(roi_mode="rectangle", rectangle_hull=source, simulations=19))
+                pattern = result.patterns[0]
+                self.assertTrue(pattern.window.is_rectangle)
+                self.assertTrue(raw_hull.covers(pattern.window.geometry))
+                self.assertLess(pattern.count, len(xy))
+                self.assertTrue(np.isfinite(pattern.envelope.lower).any())
+                self.assertTrue(np.isnan(pattern.envelope.p))
+                self.assertIn("outside_roi", result.qc.reason.to_list())
+
+    def test_inferred_rectangle_area_inside_triangle_and_notch(self):
+        triangle = np.array([[0, 0], [10, 0], [0, 10]])
+        window = make_window("rectangle", triangle)
+        self.assertTrue(Polygon(triangle).covers(window.geometry))
+        self.assertAlmostEqual(window.area, 25.0, places=6)
+        from ripley_analysis import largest_inner_rectangle
+        notch = Polygon([(0, 0), (10, 0), (10, 10), (6, 10), (6, 3), (4, 3), (4, 10), (0, 10)])
+        fitted = largest_inner_rectangle(notch)
+        self.assertTrue(notch.covers(fitted))
+        self.assertAlmostEqual(fitted.area, 40.0, places=5)
+
+    def test_roi_envelopes_across_edge_corrections(self):
+        from itertools import product
+
+        data = replace(self.data, points=self.data.points.iloc[:72], fields=(self.data.fields[0],))
+        modes = (
+            *(dict(roi_mode="infer", convex_guard=guard, infer_per_label=per_type)
+              for guard, per_type in product((False, True), repeat=2)),
+            dict(roi_mode="locked"),
+            dict(roi_mode="rectangle", rectangle_hull="convex"),
+            dict(roi_mode="rectangle", rectangle_hull="concave"),
+            dict(roi_mode="custom"),
+        )
+        for roi, correction in product(modes, ("auto", "translation", "isotropic", "border")):
+            with self.subTest(roi=roi, correction=correction):
+                settings = Settings(**roi, edge_correction=correction, marks="each", simulations=19, n_radii=6,
+                                    r_max=8, workers=1)
+                results = run_analysis(data, settings)
+                for pattern in results.patterns:
+                    self.assertTrue(np.isfinite(pattern.envelope.lower).any())
+                    self.assertTrue(np.isfinite(pattern.envelope.upper).any())
+                    self.assertEqual(np.isfinite(pattern.envelope.p), settings.roi_mode in ("locked", "custom"))
+                    if correction != "auto":
+                        self.assertEqual(pattern.window.correction, correction)
+
+        without_simulations = run_analysis(data, replace(settings, roi_mode="infer", test=False))
+        self.assertTrue(all(p.envelope is None for p in without_simulations.patterns))
+        custom_window = Polygon([(0, 0), (650, 0), (650, 650), (0, 650)])
+        configured = run_analysis(data, replace(settings, custom={None: custom_window}, test=False))
+        self.assertTrue(configured.patterns[0].window.geometry.equals(custom_window))
 
     def test_one_sample_sd_is_unavailable_and_ci_uses_whole_samples(self):
         first = self.results.patterns[:2]
@@ -337,7 +402,7 @@ class MultiSheetFixedRadiusAndBiostatsTests(unittest.TestCase):
         rows = []
         # Create 2 treatments x 4 samples with 3 point types (HRC clustered, NaRC & NCC uniform)
         from convex_hull_pattern_generator import clustered
-        win = make_window("rectangle", [], (0, 0, 600, 600))
+        win = make_window("custom", [], (0, 0, 600, 600))
         for trt, is_clust in (("Control", True), ("Colchicine", False)):
             for i in range(1, 5):
                 sid = f"{trt} {i}"
@@ -356,7 +421,7 @@ class MultiSheetFixedRadiusAndBiostatsTests(unittest.TestCase):
         bounds = {(sid, "1"): (0.0, 0.0, 600.0, 600.0) for sid in df.sample_id.unique()}
         ds = Dataset(df, pd.DataFrame(), ("mem",), Calibration(),
                      tuple(("mem", sid, "1") for sid in df.sample_id.unique()), bounds=bounds)
-        settings = Settings(roi_mode="rectangle", r_min=0.0, r_max=100.0, r_step=5.0,
+        settings = Settings(roi_mode="custom", r_min=0.0, r_max=100.0, r_step=5.0,
                             simulations=99, test=False, marks="each_and_merged")
         res = run_analysis(ds, settings)
         self.assertEqual(len(res.radii), 20)
@@ -405,7 +470,9 @@ class PyQt6UITests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         import os
-        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        import sys
+        # Qt's Windows platform plugin supplies the font metrics used by the EXE.
+        os.environ.setdefault("QT_QPA_PLATFORM", "windows" if sys.platform == "win32" else "offscreen")
         from PyQt6.QtWidgets import QApplication
         cls.app = QApplication.instance() or QApplication([])
 
@@ -426,7 +493,7 @@ class PyQt6UITests(unittest.TestCase):
 
         win.results = run_analysis(
             win.data,
-            Settings(roi_mode="rectangle", r_min=0.0, r_max=40.0, r_step=2.0, simulations=19, marks="each_and_merged"),
+            Settings(roi_mode="custom", r_min=0.0, r_max=40.0, r_step=2.0, simulations=19, marks="each_and_merged"),
         )
         presets = win._build_presets()
         self.assertGreaterEqual(len(presets), 2)
@@ -444,6 +511,57 @@ class PyQt6UITests(unittest.TestCase):
             save_figure(win.figure, d / "out.png", "PNG Test")
             self.assertTrue((d / "out.svg").exists())
             self.assertTrue((d / "out.png").exists())
+        win.close()
+
+    def test_sidebar_modes_theme_and_bilingual_infographic(self):
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtGui import QPalette, QPixmap
+        from PyQt6.QtWidgets import QScrollArea, QToolButton
+        from spatial_analysis_gui import SpatialAnalysisGUI
+        from spatial_roi_guide import ROIDiagram, ROIGuide
+        from spatial_theme import DARK, LIGHT
+
+        win = SpatialAnalysisGUI("zh-TW")
+        win.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen)
+        win.resize(1060, 700)
+        win.data = demo_data()
+        win._configure_defaults_for_dataset()
+        win.show()
+        self.assertEqual(win.settings.roi_mode, "custom")
+        self.assertEqual(win.mode_combo.itemText(0), "由點推估凹包ROI")
+        self.assertEqual(win.mode_combo.itemText(1), "由點推估凸包ROI")
+        self.assertEqual(len(win.infer_options.findChildren(QToolButton)), 2)
+        for index in (0, 1, 2, 3, 0):
+            win.mode_combo.setCurrentIndex(index)
+            self.app.processEvents()
+            self.assertEqual(win.rectangle_source.isVisible(), index == 2)
+            self.assertEqual(win.custom_options.isVisible(), index == 3)
+            self.assertEqual(win.convex_guard_cb.isVisible(), index == 0)
+            for button in win.infer_options.findChildren(QToolButton):
+                self.assertEqual(button.isVisible(), index == 0)
+
+        for lang in (0, 1):
+            win.lang_combo.setCurrentIndex(lang)
+            sidebar = win.centralWidget().findChild(QScrollArea, "AnalysisSidebar")
+            for scheme, theme in ((Qt.ColorScheme.Dark, DARK), (Qt.ColorScheme.Light, LIGHT)):
+                win._apply_color_scheme(scheme)
+                self.app.processEvents()
+                self.assertEqual(sidebar.horizontalScrollBar().maximum(), 0)
+                self.assertEqual(sidebar.viewport().palette().color(QPalette.ColorRole.Window).name(), theme["window"])
+                self.assertIn(theme["control_border"], self.app.styleSheet())
+
+        root = Path(__file__).resolve().parents[1]
+        self.assertFalse(QPixmap(str(root / "ui" / "checked.svg")).isNull())
+        guide = ROIGuide(win, "zh-TW")
+        guide.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen)
+        guide.show()
+        self.app.processEvents()
+        diagrams = guide.findChildren(ROIDiagram)
+        self.assertEqual(len(diagrams), 16)
+        self.assertTrue(all(" / " in diagram.accessibleName() for diagram in diagrams))
+        for diagram in diagrams:
+            self.assertFalse(diagram.grab().isNull())
+        guide.close()
         win.close()
 
     def test_pyqt_import_dialog_multisheet_and_smoke_test(self):
@@ -518,7 +636,7 @@ class PyQt6UITests(unittest.TestCase):
             points=demo.points[demo.points.sample_id == "C1"].reset_index(drop=True),
             fields=tuple(f for f in demo.fields if f[1] == "C1"),
         )
-        st_seq = Settings(roi_mode="rectangle", simulations=39, n_radii=15, seed=999, workers=1)
+        st_seq = Settings(roi_mode="custom", simulations=39, n_radii=15, seed=999, workers=1)
         st_par = replace(st_seq, workers=4)
         res_seq = run_analysis(sub_two, st_seq)
         res_par = run_analysis(sub_two, st_par)

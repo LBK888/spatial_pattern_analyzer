@@ -18,7 +18,7 @@ try:
 
     import numpy as np
     from PyQt6.QtCore import Qt, QThread, pyqtSignal
-    from PyQt6.QtGui import QFont, QKeySequence, QShortcut
+    from PyQt6.QtGui import QFont, QKeySequence, QPalette, QPixmap, QShortcut
     from PyQt6.QtWidgets import (
         QAbstractItemView,
         QApplication,
@@ -66,6 +66,8 @@ try:
         series_selector_dialog,
         show_error,
     )
+    from spatial_roi_guide import ROIGuide
+    from spatial_theme import apply_theme
     from spatial_plots import (
         contrast_figure,
         group_figure,
@@ -99,6 +101,7 @@ except BaseException:
 
 ASSETS = Path(__file__).resolve().parent
 MODES = ("infer", "locked", "rectangle", "custom")
+RECTANGLE_HULLS = ("convex", "concave")
 EDGE_CHOICES = ("auto", "translation", "isotropic", "border")
 EDGE_LABELS = ("edge_auto", "edge_translation", "edge_isotropic", "edge_border")
 MARKS_MODES = ("all", "each", "each_and_merged", "cross", "cross_all")
@@ -106,174 +109,6 @@ VIEWS = ("view_groups", "view_roi", "view_contrast", "view_qc")
 BANDS = ("sd", "se", "ci", "off")
 PAIRING_MODES = ("auto", "independent", "paired")
 PERM_STATS = ("welch", "diff")
-
-APP_STYLESHEET = """
-QMainWindow, QDialog {
-    background-color: #f3f6f8;
-    color: #172c3c;
-}
-QWidget {
-    color: #172c3c;
-}
-QFrame#CardFrame, QWidget#CardFrame {
-    background-color: #ffffff;
-    border: 1px solid #d9e3eb;
-    border-radius: 8px;
-}
-QLabel#TitleLabel {
-    font-size: 20px;
-    font-weight: 700;
-    color: #172c3c;
-}
-QLabel#HeroTitle {
-    font-size: 23px;
-    font-weight: 700;
-    color: #172c3c;
-    background: transparent;
-}
-QLabel#HeroBody {
-    font-size: 13px;
-    color: #526779;
-    background: transparent;
-}
-QLabel#SectionLabel {
-    font-size: 13px;
-    font-weight: 700;
-    color: #172c3c;
-}
-QLabel#MutedLabel {
-    color: #526779;
-    font-size: 12px;
-}
-QLabel#BannerLabel {
-    background-color: #eaf3fb;
-    border: 1px solid #c6ddf1;
-    border-radius: 6px;
-    padding: 6px 10px;
-    color: #15344d;
-    font-size: 12px;
-}
-QGroupBox {
-    font-weight: 600;
-    border: 1px solid #d5dfe7;
-    border-radius: 6px;
-    margin-top: 8px;
-    padding-top: 10px;
-    background-color: #ffffff;
-}
-QGroupBox::title {
-    subcontrol-origin: margin;
-    left: 10px;
-    padding: 0 4px;
-}
-QPushButton {
-    background-color: #ffffff;
-    border: 1px solid #c5d3dd;
-    border-radius: 5px;
-    padding: 6px 13px;
-    color: #172c3c;
-}
-QPushButton:hover {
-    background-color: #e7f1fa;
-    border-color: #9ab7cd;
-}
-QPushButton:disabled {
-    background-color: #eaeff3;
-    color: #93a4b2;
-    border-color: #d6e0e7;
-}
-QPushButton#SmallBtn {
-    padding: 3px 9px;
-    font-size: 12px;
-}
-QPushButton#PrimaryBtn {
-    background-color: #1a6fb5;
-    border: 1px solid #1a6fb5;
-    color: #ffffff;
-    font-weight: 600;
-}
-QPushButton#PrimaryBtn:hover {
-    background-color: #145b96;
-    border-color: #145b96;
-}
-QPushButton#PrimaryBtn:disabled {
-    background-color: #a1b8ca;
-    border-color: #a1b8ca;
-    color: #ffffff;
-}
-QToolButton#HelpBtn {
-    background: transparent;
-    border: none;
-    color: #1a6fb5;
-    font-weight: 700;
-    padding: 0px 3px;
-}
-QToolButton#HelpBtn:hover {
-    color: #0f4c81;
-}
-QLineEdit, QComboBox {
-    background-color: #ffffff;
-    border: 1px solid #c5d3dd;
-    border-radius: 4px;
-    padding: 4px 7px;
-    min-height: 22px;
-}
-QLineEdit:disabled, QComboBox:disabled {
-    background-color: #edf2f6;
-    color: #8fa0ae;
-}
-QTabWidget::pane {
-    border: 1px solid #d5dfe7;
-    border-radius: 6px;
-    background-color: #ffffff;
-    top: -1px;
-}
-QTabBar::tab {
-    background-color: #e4edf3;
-    border: 1px solid #d5dfe7;
-    border-bottom: none;
-    border-top-left-radius: 6px;
-    border-top-right-radius: 6px;
-    padding: 7px 15px;
-    margin-right: 2px;
-    color: #41586b;
-}
-QTabBar::tab:selected {
-    background-color: #ffffff;
-    color: #172c3c;
-    font-weight: 600;
-}
-QTableWidget {
-    background-color: #ffffff;
-    alternate-background-color: #f8fafc;
-    gridline-color: #e5edf3;
-    border: 1px solid #d5dfe7;
-    border-radius: 5px;
-    selection-background-color: #d9ecfb;
-    selection-color: #172c3c;
-}
-QHeaderView::section {
-    background-color: #eaf0f5;
-    color: #172c3c;
-    font-weight: 600;
-    padding: 5px 7px;
-    border: none;
-    border-right: 1px solid #d5dfe7;
-    border-bottom: 1px solid #d5dfe7;
-}
-QProgressBar {
-    border: 1px solid #c5d3dd;
-    border-radius: 4px;
-    background-color: #ffffff;
-    text-align: center;
-    height: 14px;
-}
-QProgressBar::chunk {
-    background-color: #1a6fb5;
-    border-radius: 3px;
-}
-"""
-
 
 def demo_data():
     path = ASSETS / "demo" / "points.csv"
@@ -350,14 +185,19 @@ class SpatialAnalysisGUI(QMainWindow):
 
         self.resize(1280, 830)
         self.setMinimumSize(980, 660)
+        app = QApplication.instance()
+        hints = app.styleHints()
+        hints.colorSchemeChanged.connect(self._apply_color_scheme)
+        self._apply_color_scheme(hints.colorScheme())
         self.draw_shell()
+
+    def _apply_color_scheme(self, scheme):
+        apply_theme(QApplication.instance(), scheme)
 
     def setup_styles(self):
         app = QApplication.instance()
         family = "Microsoft JhengHei UI" if self.t.lang == "zh-TW" else "Segoe UI"
-        if app is not None:
-            app.setFont(QFont(family, 10))
-        self.setStyleSheet(APP_STYLESHEET)
+        app.setFont(QFont(family, 10))
 
     def _preserve_sidebar_draft(self):
         if hasattr(self, "fixed_r_cb") and self.fixed_r_cb is not None:
@@ -418,10 +258,11 @@ class SpatialAnalysisGUI(QMainWindow):
         outer.addLayout(body, stretch=1)
 
         side_scroll = QScrollArea()
-        side_scroll.setFixedWidth(312)
+        side_scroll.setObjectName("AnalysisSidebar")
+        side_scroll.setFixedWidth(366)
         side_scroll.setWidgetResizable(True)
         side_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        side_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        side_scroll.viewport().setBackgroundRole(QPalette.ColorRole.Window)
         side_widget = QWidget()
         side = QVBoxLayout(side_widget)
         side.setContentsMargins(0, 4, 8, 4)
@@ -460,8 +301,12 @@ class SpatialAnalysisGUI(QMainWindow):
         roi_lbl = QLabel(t("roi"))
         roi_lbl.setObjectName("SectionLabel")
         roi_hdr.addWidget(roi_lbl)
-        roi_hdr.addWidget(help_button(roi_card, t("roi_help")))
         roi_hdr.addStretch(1)
+        roi_guide_btn = QPushButton(t("roi_guide"))
+        roi_guide_btn.setObjectName("SmallBtn")
+        roi_guide_btn.setToolTip(t("roi_help"))
+        roi_guide_btn.clicked.connect(lambda: ROIGuide(self, self.t.lang).exec())
+        roi_hdr.addWidget(roi_guide_btn)
         roi_layout.addLayout(roi_hdr)
 
         self.mode_combo = QComboBox()
@@ -474,6 +319,19 @@ class SpatialAnalysisGUI(QMainWindow):
         self.roi_note.setWordWrap(True)
         self.roi_note.setObjectName("MutedLabel")
         roi_layout.addWidget(self.roi_note)
+
+        self.rectangle_source = QWidget()
+        rectangle_row = QHBoxLayout(self.rectangle_source)
+        rectangle_row.setContentsMargins(0, 0, 0, 0)
+        rectangle_label = QLabel(t("rectangle_source"))
+        self.rectangle_combo = QComboBox()
+        self.rectangle_combo.addItems([t("source_" + key) for key in RECTANGLE_HULLS])
+        self.rectangle_combo.setCurrentIndex(RECTANGLE_HULLS.index(self.settings.rectangle_hull))
+        self.rectangle_combo.currentIndexChanged.connect(self._on_rectangle_source_changed)
+        rectangle_label.setBuddy(self.rectangle_combo)
+        rectangle_row.addWidget(rectangle_label)
+        rectangle_row.addWidget(self.rectangle_combo, stretch=1)
+        roi_layout.addWidget(self.rectangle_source)
 
         # Edge correction & hull area bias guard (Recommendations A & C)
         edge_row = QHBoxLayout()
@@ -488,26 +346,40 @@ class SpatialAnalysisGUI(QMainWindow):
         self.edge_combo.currentIndexChanged.connect(self._on_edge_changed)
         roi_layout.addWidget(self.edge_combo)
 
-        self.convex_guard_row = QHBoxLayout()
+        self.infer_options = QWidget()
+        infer_layout = QVBoxLayout(self.infer_options)
+        infer_layout.setContentsMargins(0, 0, 0, 0)
         self.convex_guard_cb = QCheckBox(t("convex_hull_guard"))
-        self.convex_guard_cb.setChecked(self.settings.hull_ratio >= 0.999)
+        self.convex_guard_cb.setChecked(self.settings.convex_guard)
         self.convex_guard_cb.toggled.connect(self._on_convex_guard_toggled)
-        self.convex_guard_row.addWidget(self.convex_guard_cb)
-        self.convex_guard_row.addWidget(help_button(roi_card, t("convex_hull_guard_help")))
-        self.convex_guard_row.addStretch(1)
-        roi_layout.addLayout(self.convex_guard_row)
-
-        self.shared_hull_row = QHBoxLayout()
         self.shared_hull_cb = QCheckBox(t("shared_sample_hull"))
         self.shared_hull_cb.setChecked(not self.settings.infer_per_label)
         self.shared_hull_cb.toggled.connect(self._on_shared_hull_toggled)
-        self.shared_hull_row.addWidget(self.shared_hull_cb)
-        self.shared_hull_row.addWidget(help_button(roi_card, t("shared_sample_hull_help")))
-        self.shared_hull_row.addStretch(1)
-        roi_layout.addLayout(self.shared_hull_row)
+        for check, tip in ((self.convex_guard_cb, "convex_hull_guard_help"),
+                           (self.shared_hull_cb, "shared_sample_hull_help")):
+            row = QHBoxLayout()
+            row.addWidget(check)
+            row.addWidget(help_button(self.infer_options, t(tip)))
+            row.addStretch(1)
+            infer_layout.addLayout(row)
+        roi_layout.addWidget(self.infer_options)
 
-        self.roi_btn_layout = QHBoxLayout()
-        roi_layout.addLayout(self.roi_btn_layout)
+        self.custom_options = QWidget()
+        custom_buttons = QVBoxLayout(self.custom_options)
+        custom_buttons.setContentsMargins(0, 0, 0, 0)
+        custom_row = QHBoxLayout()
+        custom_buttons.addLayout(custom_row)
+        for key, slot in (("load_roi", self.import_roi), ("draw_roi", self.draw_roi),
+                          ("configure_roi", self.open_rectangle_dialog)):
+            button = QPushButton(t(key))
+            button.setObjectName("SmallBtn")
+            button.clicked.connect(slot)
+            if key == "configure_roi":
+                custom_buttons.addWidget(button, alignment=Qt.AlignmentFlag.AlignLeft)
+            else:
+                custom_row.addWidget(button)
+        custom_row.addStretch(1)
+        roi_layout.addWidget(self.custom_options)
         side.addWidget(roi_card)
 
         # Card 3: Point-Type Mode (promoted to main sidebar for discoverability)
@@ -535,6 +407,10 @@ class SpatialAnalysisGUI(QMainWindow):
         cross_layout.setContentsMargins(0, 2, 0, 0)
         self.focal_combo = QComboBox()
         self.neighbor_combo = QComboBox()
+        for combo in (self.focal_combo, self.neighbor_combo):
+            combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+            combo.setMinimumContentsLength(8)
+            combo.currentTextChanged.connect(combo.setToolTip)
         cross_layout.addWidget(self.focal_combo, stretch=1)
         cross_layout.addWidget(QLabel("→"))
         cross_layout.addWidget(self.neighbor_combo, stretch=1)
@@ -645,11 +521,13 @@ class SpatialAnalysisGUI(QMainWindow):
             self.settings = replace(self.settings, edge_correction=EDGE_CHOICES[idx])
 
     def _on_convex_guard_toggled(self, checked: bool):
-        new_ratio = 1.0 if checked else (0.35 if self.settings.hull_ratio >= 0.999 else self.settings.hull_ratio)
-        self.settings = replace(self.settings, hull_ratio=new_ratio)
+        self.settings = replace(self.settings, convex_guard=checked)
 
     def _on_shared_hull_toggled(self, checked: bool):
         self.settings = replace(self.settings, infer_per_label=not checked)
+
+    def _on_rectangle_source_changed(self, index):
+        self.settings = replace(self.settings, rectangle_hull=RECTANGLE_HULLS[index])
 
     def _on_marks_changed(self):
         new_mark = MARKS_MODES[self.marks_combo.currentIndex()]
@@ -671,7 +549,9 @@ class SpatialAnalysisGUI(QMainWindow):
 
     def _sync_sidebar_r(self):
         if self.fixed_r_cb.isChecked():
-            _, rmax_def, rstep_def = default_fixed_grid(self.data)
+            _, rmax_def, rstep_def = default_fixed_grid(
+                self.data, use_known_bounds=self.settings.roi_mode == "custom"
+            )
             if not self.rmax_edit.text().strip():
                 self.rmax_edit.setText(f"{rmax_def:g}")
             if not self.rstep_edit.text().strip():
@@ -756,39 +636,28 @@ class SpatialAnalysisGUI(QMainWindow):
 
         mode = self.settings.roi_mode
         note = t(mode + "_note")
-        if mode == "rectangle" and self.settings.rectangle is not None:
-            note += "\n" + " · ".join(f"{x:g}" for x in self.settings.rectangle)
-        if mode == "custom" and self.settings.custom:
-            note += "\n" + (Path(self.roi_path).name if self.roi_path else f"{len(self.settings.custom)} ROI(s)")
+        if mode == "custom":
+            if self.settings.custom:
+                note += "\n" + (Path(self.roi_path).name if self.roi_path else t("custom_count", n=len(self.settings.custom)))
+            elif self.data is not None and self.data.bounds:
+                note += "\n" + t("custom_bounds_count", n=len(self.data.bounds))
         self.roi_note.setText(note)
 
-        self._clear_layout(self.roi_btn_layout)
-        actions = {
-            "rectangle": (("configure_roi", self.open_rectangle_dialog),),
-            "custom": (("load_roi", self.import_roi), ("draw_roi", self.draw_roi)),
-        }
         busy = self.job is not None
         ready = self.data is not None and not busy
-        for label, cmd in actions.get(mode, ()):
-            b = QPushButton(t(label))
-            b.setObjectName("SmallBtn")
-            b.setEnabled(ready)
-            b.clicked.connect(cmd)
-            self.roi_btn_layout.addWidget(b)
-        if actions.get(mode):
-            self.roi_btn_layout.addStretch(1)
+        self.rectangle_source.setVisible(mode == "rectangle")
+        self.rectangle_source.setEnabled(ready)
+        self.custom_options.setVisible(mode == "custom")
+        self.custom_options.setEnabled(ready)
+        self.infer_options.setVisible(mode == "infer")
+        self.convex_guard_cb.setEnabled(ready)
+        self.shared_hull_cb.setEnabled(ready)
 
         self.open_btn.setEnabled(not busy)
         self.reimport_btn.setEnabled(not busy and self.last_import_paths is not None)
         self.demo_btn.setEnabled(not busy)
         self.mode_combo.setEnabled(ready)
         self.edge_combo.setEnabled(ready)
-        is_infer = mode == "infer"
-        self.convex_guard_cb.setVisible(is_infer)
-        self.convex_guard_cb.setEnabled(ready and is_infer)
-        is_inferred_any = mode in ("infer", "locked")
-        self.shared_hull_cb.setVisible(is_inferred_any)
-        self.shared_hull_cb.setEnabled(ready and is_inferred_any)
         self.marks_combo.setEnabled(ready)
         self.focal_combo.setEnabled(ready)
         self.neighbor_combo.setEnabled(ready)
@@ -851,11 +720,14 @@ class SpatialAnalysisGUI(QMainWindow):
         if self.data is None:
             return
 
-        def save_bounds(bounds):
-            self.settings = replace(self.settings, rectangle=bounds)
+        def save_bounds(geometry):
+            self.settings = replace(self.settings, custom={**self.settings.custom, None: geometry})
+            self.roi_path = ""
             self.refresh_sidebar()
 
-        rectangle_dialog(self, self.t, self.data.calibration, self.settings.rectangle, save_bounds)
+        window = self.settings.custom.get(None)
+        current = window.bounds if window is not None and window.equals(window.envelope) else None
+        rectangle_dialog(self, self.t, self.data.calibration, current, save_bounds)
 
     def import_roi(self):
         if self.data is None:
@@ -908,7 +780,7 @@ class SpatialAnalysisGUI(QMainWindow):
                 self.edge_combo.setCurrentIndex(EDGE_CHOICES.index(new_settings.edge_correction))
             self.edge_combo.blockSignals(False)
             self.convex_guard_cb.blockSignals(True)
-            self.convex_guard_cb.setChecked(new_settings.hull_ratio >= 0.999)
+            self.convex_guard_cb.setChecked(new_settings.convex_guard)
             self.convex_guard_cb.blockSignals(False)
             self.shared_hull_cb.blockSignals(True)
             self.shared_hull_cb.setChecked(not new_settings.infer_per_label)
@@ -1018,7 +890,7 @@ class SpatialAnalysisGUI(QMainWindow):
     def _configure_defaults_for_dataset(self):
         n_samples = self.data.points.sample_id.nunique()
         types = sorted_types(self.data.points.cell_type)
-        roi_mode = "rectangle" if self.data.bounds else "infer"
+        roi_mode = "custom" if self.data.bounds else "infer"
         marks = "each_and_merged" if len(types) >= 2 else "all"
         if n_samples > 1:
             r0, rmax, rstep = default_fixed_grid(self.data)
@@ -1046,11 +918,14 @@ class SpatialAnalysisGUI(QMainWindow):
         self.edge_combo.setCurrentIndex(EDGE_CHOICES.index(self.settings.edge_correction))
         self.edge_combo.blockSignals(False)
         self.convex_guard_cb.blockSignals(True)
-        self.convex_guard_cb.setChecked(self.settings.hull_ratio >= 0.999)
+        self.convex_guard_cb.setChecked(self.settings.convex_guard)
         self.convex_guard_cb.blockSignals(False)
         self.shared_hull_cb.blockSignals(True)
         self.shared_hull_cb.setChecked(not self.settings.infer_per_label)
         self.shared_hull_cb.blockSignals(False)
+        self.rectangle_combo.blockSignals(True)
+        self.rectangle_combo.setCurrentIndex(0)
+        self.rectangle_combo.blockSignals(False)
         self.marks_combo.blockSignals(True)
         self.marks_combo.setCurrentIndex(MARKS_MODES.index(self.settings.marks))
         self.marks_combo.blockSignals(False)
@@ -1756,9 +1631,16 @@ def smoke_test(path: Path):
             assert xlrd.__version__
         app = QApplication.instance() or QApplication([])
         window = SpatialAnalysisGUI("en")
+        assert not QPixmap(str(ASSETS / "ui" / "checked.svg")).isNull()
+        guide = ROIGuide(window, "zh-TW")
+        assert not guide.grab().isNull()
         window.data = demo_data()
         window._configure_defaults_for_dataset()
-        window.results = run_analysis(window.data, Settings(roi_mode="rectangle", simulations=19))
+        window.results = run_analysis(window.data, Settings(roi_mode="custom", simulations=19))
+        one_field = replace(window.data, points=window.data.points.iloc[:72], fields=window.data.fields[:1])
+        for mode in ("infer", "rectangle"):
+            reference = run_analysis(one_field, Settings(roi_mode=mode, simulations=19)).patterns[0].envelope
+            assert np.isfinite(reference.lower).any() and np.isnan(reference.p)
         window.render_main()
         for lang in ("en", "zh-TW"):
             t = Translator(lang)
