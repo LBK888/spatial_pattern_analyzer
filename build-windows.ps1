@@ -6,9 +6,11 @@ $ErrorActionPreference = "Stop"
 Push-Location -LiteralPath $PSScriptRoot
 $origPath = $env:PATH
 try {
-    # Exclude Conda DLL directories from PATH so PyInstaller never bundles conflicting Conda UCRT/ICU DLLs
-    $env:PATH = ($env:PATH -split ';' | Where-Object { $_ -and ($_ -notmatch '(?i)conda') }) -join ';'
-    & $Python -B -m unittest discover -s tests
+    $pythonExe = (Get-Command $Python -CommandType Application | Select-Object -First 1).Source
+    # PyInstaller searches PATH for DLLs. Third-party ICU and UCRT from other
+    # applications can shadow the Windows versions that Qt imports.
+    $env:PATH = @((Split-Path -Parent $pythonExe), (Join-Path $env:SystemRoot "System32"), $env:SystemRoot) -join ';'
+    & $pythonExe -B -m unittest discover -s tests
     if ($LASTEXITCODE -ne 0) { throw "Tests failed." }
     $buildArgs = @(
         "--noconfirm", "--clean", "--onefile", "--windowed", "--disable-windowed-traceback",
@@ -29,7 +31,7 @@ try {
         "--add-data", "$PSScriptRoot/ui/checked.svg:ui",
         "$PSScriptRoot/spatial_analysis_gui.py"
     )
-    & $Python -m PyInstaller @buildArgs
+    & $pythonExe -m PyInstaller @buildArgs
     if ($LASTEXITCODE -ne 0) { throw "PyInstaller build failed." }
     $exe = Join-Path $Output "SpatialPatternAnalyzer-Windows-x64.exe"
     $check = Join-Path $PSScriptRoot (".build/smoke-" + [guid]::NewGuid().ToString("N"))
